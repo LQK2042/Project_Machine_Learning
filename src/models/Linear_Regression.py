@@ -2,19 +2,25 @@
 import os
 import numpy as np
 import pandas as pd
+
 class Linear_Regression:
 
-
-    def __init__(self, learning_rate=0.01, n_iterations=1000, use_standardize=True):
+    def __init__(self, learning_rate=0.01, n_iterations=10_000, use_standardize=True, early_stopping=False, tol=1e-4, patience=10):
         self.learning_rate = float(learning_rate)
         self.n_iterations = int(n_iterations)
         self.use_standardize = bool(use_standardize)
 
+        self.early_stopping = early_stopping
+        self.tol = tol 
+        self.patience = patience 
+        
         self.weights = None
         self.bias = None
 
         self.x_mean_ = None
         self.x_std_ = None
+
+        self.history_ = {"loss": [], "iterations": 0}
 
     def _fit_scaler(self, X):
         self.x_mean_ = np.mean(X, axis=0)
@@ -43,15 +49,34 @@ class Linear_Regression:
         self.weights = np.zeros(n_features, dtype=float)
         self.bias = 0.0
 
-        for _ in range(self.n_iterations):
+        self.history_ = {"loss": [], "iterations": 0}
+        best_loss = float('inf')
+        patience_counter = 0
+
+        for i in range(self.n_iterations):
             y_pred = X_train @ self.weights + self.bias
             error = y_pred - y
+
+            current_loss = float(np.mean(error ** 2))
+            self.history_["loss"].append(current_loss)
 
             dw = (2.0 / n_samples) * (X_train.T @ error)
             db = (2.0 / n_samples) * np.sum(error)
 
             self.weights -= self.learning_rate * dw
             self.bias -= self.learning_rate * db
+
+            if self.early_stopping:
+                if best_loss - current_loss > self.tol:
+                    best_loss = current_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= self.patience:
+                        self.history_["iterations"] = i + 1
+                        break
+        else:
+            self.history_["iterations"] = self.n_iterations
 
         return self
 
@@ -133,13 +158,30 @@ class Linear_Regression:
         v = ((y - y.mean()) ** 2).sum()
         return float(1.0 - u / v) if v != 0 else 0.0
 
+    def predict_proba(self, X):
+
+        return self.predict(X)
+
+    def mae(self, X, y):
+        y = np.asarray(y, dtype=float).reshape(-1)
+        y_pred = self.predict(X)
+        return float(np.mean(np.abs(y - y_pred)))
+
+    def rmse(self, X, y):
+        return float(np.sqrt(self.evaluate(X, y)))
+
     def get_params(self):
         return {
             "weights": self.weights,
             "bias": self.bias,
             "x_mean_": self.x_mean_,
             "x_std_": self.x_std_,
-            "use_standardize": self.use_standardize
+            "use_standardize": self.use_standardize,
+            "learning_rate": self.learning_rate,
+            "n_iterations": self.n_iterations,
+            "early_stopping": self.early_stopping,
+            "tol": self.tol,
+            "patience": self.patience
         }
 
     def set_params(self, params):
@@ -148,6 +190,11 @@ class Linear_Regression:
         self.x_mean_ = params.get("x_mean_", self.x_mean_)
         self.x_std_ = params.get("x_std_", self.x_std_)
         self.use_standardize = params.get("use_standardize", self.use_standardize)
+        self.learning_rate = params.get("learning_rate", self.learning_rate)
+        self.n_iterations = params.get("n_iterations", self.n_iterations)
+        self.early_stopping = params.get("early_stopping", self.early_stopping)
+        self.tol = params.get("tol", self.tol)
+        self.patience = params.get("patience", self.patience)
         return self
 
     def save_model(self, file_path):
@@ -173,10 +220,6 @@ class Linear_Regression:
         return self.set_params(params)
 
     def ridge_fit(self, X, y, alpha=1.0):
-        """
-        Ridge regression via GD:
-        Loss = MSE + alpha * ||w||^2
-        """
         X = np.asarray(X, dtype=float)
         y = np.asarray(y, dtype=float).reshape(-1)
         n_samples, n_features = X.shape
@@ -217,32 +260,50 @@ class Linear_Regression:
     def __repr__(self):
         return self.__str__()
 if __name__ == "__main__":
-
-
- 
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    DATA_PATH = os.path.join(BASE_DIR, "data", "ratings_small.csv")
+    DATA_PATH = os.path.join(BASE_DIR, "data", "ratings_processed.csv")
 
     data = pd.read_csv(DATA_PATH)
 
-    X = data[["userId", "movieId"]].values
-    y = data["rating"].values
+    drop_ids = {"userId", "movieId", "tmdbId"}
+    target = "rating"
+    feature_cols = [c for c in data.columns if c != target and c not in drop_ids]
 
-    X_mean = X.mean(axis=0)
-    X_std = X.std(axis=0)
-    X = (X - X_mean) / X_std
+    data[feature_cols] = data[feature_cols].apply(pd.to_numeric, errors="coerce")
+    data[target] = pd.to_numeric(data[target], errors="coerce")
+
+    data.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    data = data.dropna(subset=[target]).copy()
+
+    data[feature_cols] = data[feature_cols].fillna(data[feature_cols].median())
+
+    X = data[feature_cols].to_numpy(dtype=float)
+    y = data[target].to_numpy(dtype=float)
+
+    rng = np.random.default_rng(42)
+    idx = np.arange(len(X))
+    rng.shuffle(idx)
+    n_test = int(0.2 * len(X))
+    test_idx = idx[:n_test]
+    train_idx = idx[n_test:]
+
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_test,  y_test  = X[test_idx],  y[test_idx]
 
     model = Linear_Regression(
         learning_rate=0.01,
-        n_iterations=1000
+        n_iterations=10000,
+        use_standardize=True,     
+        early_stopping=True,
+        tol=1e-6,
+        patience=50
     )
 
-    model.fit(X, y)
+    model.fit(X_train, y_train)
 
-    print("MSE:", model.evaluate(X, y))
-    print("R2 :", model.score(X, y))
-
-    sample = np.array([[1, 31]])
-    sample = (sample - X_mean) / X_std
-
-    print("Predicted rating:", model.predict(sample)[0])
+    print("Train MSE:", model.evaluate(X_train, y_train))
+    print("Train R2 :", model.score(X_train, y_train))
+    print("Test  MSE:", model.evaluate(X_test, y_test))
+    print("Test  R2 :", model.score(X_test, y_test))
+    print("Used iterations:", model.history_["iterations"])
