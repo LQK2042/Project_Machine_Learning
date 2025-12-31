@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 
 class Linear_Regression:
-
     def __init__(self, learning_rate=0.01, n_iterations=10_000, use_standardize=True, early_stopping=False, tol=1e-4, patience=10):
         self.learning_rate = float(learning_rate)
         self.n_iterations = int(n_iterations)
@@ -234,16 +233,39 @@ class Linear_Regression:
         self.bias = 0.0
 
         alpha = float(alpha)
+        
+        self.history_ = {"loss": [], "iterations": 0}
+        best_loss = float('inf')
+        patience_counter = 0
 
-        for _ in range(self.n_iterations):
+        for i in range(self.n_iterations):
             y_pred = X_train @ self.weights + self.bias
             error = y_pred - y
+
+            current_loss = float(np.mean(error ** 2) + alpha * np.sum(self.weights ** 2))
+            self.history_["loss"].append(current_loss)
 
             dw = (2.0 / n_samples) * (X_train.T @ error) + 2.0 * alpha * self.weights
             db = (2.0 / n_samples) * np.sum(error)
 
+            grad_norm = np.linalg.norm(dw)
+            if grad_norm > 1.0:
+                dw = dw / grad_norm
+
             self.weights -= self.learning_rate * dw
             self.bias -= self.learning_rate * db
+
+            if self.early_stopping:
+                if best_loss - current_loss > self.tol:
+                    best_loss = current_loss
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= self.patience:
+                        self.history_["iterations"] = i + 1
+                        break
+        else:
+            self.history_["iterations"] = self.n_iterations
 
         return self
 
@@ -261,49 +283,26 @@ class Linear_Regression:
         return self.__str__()
 if __name__ == "__main__":
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-    DATA_PATH = os.path.join(BASE_DIR, "data", "ratings_processed.csv")
+    DATA_PATH = os.path.join(BASE_DIR, "data", "data_raw.csv")
 
     data = pd.read_csv(DATA_PATH)
-
-    drop_ids = {"userId", "movieId", "tmdbId"}
+    drop_ids = {"userId", "movieId"} 
     target = "rating"
     feature_cols = [c for c in data.columns if c != target and c not in drop_ids]
-
+    
     data[feature_cols] = data[feature_cols].apply(pd.to_numeric, errors="coerce")
     data[target] = pd.to_numeric(data[target], errors="coerce")
-
     data.replace([np.inf, -np.inf], np.nan, inplace=True)
-
     data = data.dropna(subset=[target]).copy()
-
     data[feature_cols] = data[feature_cols].fillna(data[feature_cols].median())
 
     X = data[feature_cols].to_numpy(dtype=float)
     y = data[target].to_numpy(dtype=float)
 
-    rng = np.random.default_rng(42)
-    idx = np.arange(len(X))
-    rng.shuffle(idx)
-    n_test = int(0.2 * len(X))
-    test_idx = idx[:n_test]
-    train_idx = idx[n_test:]
+    print(f"Dataset: {len(data)} samples | Features: {len(feature_cols)}")
 
-    X_train, y_train = X[train_idx], y[train_idx]
-    X_test,  y_test  = X[test_idx],  y[test_idx]
-
-    model = Linear_Regression(
-        learning_rate=0.01,
-        n_iterations=10000,
-        use_standardize=True,     
-        early_stopping=True,
-        tol=1e-6,
-        patience=50
-    )
-
-    model.fit(X_train, y_train)
-
-    print("Train MSE:", model.evaluate(X_train, y_train))
-    print("Train R2 :", model.score(X_train, y_train))
-    print("Test  MSE:", model.evaluate(X_test, y_test))
-    print("Test  R2 :", model.score(X_test, y_test))
-    print("Used iterations:", model.history_["iterations"])
+    model = Linear_Regression(learning_rate=0.1, n_iterations=10000, use_standardize=True, early_stopping=True, tol=1e-8, patience=200)
+    model.fit(X, y)
+    
+    print(f"\n[Linear Regression] Iterations: {model.history_['iterations']}")
+    print(f"  MSE: {model.evaluate(X, y):.4f} | RMSE: {model.rmse(X, y):.4f} | MAE: {model.mae(X, y):.4f} | R²: {model.score(X, y):.4f}")
