@@ -1,4 +1,4 @@
-#CMD# Cao Minh Đạt - 23162015
+# Cao Minh Đạt - 23162015
 
 import numpy as np
 import pandas as pd
