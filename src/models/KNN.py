@@ -1,208 +1,372 @@
-# Lê Quang khải - 23162042 
-import numpy as np
-import pandas as pd
-from pathlib import Path
+import csv
+import os
+import math
+import heapq
+import tkinter as tk
+from tkinter import ttk, messagebox
 
-def train_test_split(df, test_size=0.2, seed=42):
-    rng = np.random.default_rng(seed)
-    idx = np.arange(len(df))
-    rng.shuffle(idx)
-    cut = int(len(df) * (1 - test_size))
-    train_idx, test_idx = idx[:cut], idx[cut:]
-    return df.iloc[train_idx].reset_index(drop=True), df.iloc[test_idx].reset_index(drop=True)
+RAW_PATH = os.path.join("data", "data_raw.csv")
+KNN_PATH = os.path.join("data", "data_KNN.csv")
 
-def rmse(y_true, y_pred):
-    y_true = np.asarray(y_true, dtype=np.float32)
-    y_pred = np.asarray(y_pred, dtype=np.float32)
-    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+NUM_COLS = ["budget", "popularity", "release_year"]
+TARGET_COL = "rating"
+EPS = 1e-9
 
-def mae(y_true, y_pred):
-    y_true = np.asarray(y_true, dtype=np.float32)
-    y_pred = np.asarray(y_pred, dtype=np.float32)
-    return float(np.mean(np.abs(y_true - y_pred)))
 
-def norm_genre_name(s: str) -> str:
+# -------------------- data utils (standard library only) --------------------
+def clean_col(name: str) -> str:
+    return (name or "").lstrip("\ufeff").strip()
 
-    return s.strip().replace(" ", "_")
+def norm_col(name: str) -> str:
+    return clean_col(name).lower()
 
-def build_X_y_scaled(df: pd.DataFrame,
-                     target_col="rating",
-                     numeric_cols=("budget", "popularity", "release_year"),
-                     genre_prefix="genre_",
-                     clip_scaled=True,
-                     clip_lo=-5.0,
-                     clip_hi=5.0):
+def to_float(x):
+    if x is None:
+        return None
+    s = str(x).strip()
+    if s == "" or s.lower() in {"na", "nan", "null", "none"}:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
-    df = df.copy()
-    df.columns = df.columns.str.strip()
+def median(vals):
+    vals = sorted(vals)
+    n = len(vals)
+    if n == 0:
+        return 0.0
+    mid = n // 2
+    return float(vals[mid]) if n % 2 == 1 else (vals[mid - 1] + vals[mid]) / 2.0
 
-    for c in list(numeric_cols) + [target_col]:
-        if c not in df.columns:
-            raise ValueError(f"Missing column: {c}")
+def mean_std(vals):
+    n = len(vals)
+    if n == 0:
+        return 0.0, 1.0
+    mu = sum(vals) / n
+    var = sum((v - mu) ** 2 for v in vals) / n  # ddof=0
+    sd = math.sqrt(var)
+    if sd == 0:
+        sd = 1.0
+    return mu, sd
 
-    genre_cols = [c for c in df.columns if c.startswith(genre_prefix)]
-    if not genre_cols:
-        raise ValueError(f"No genre_* columns found with prefix '{genre_prefix}'.")
+def squared_distance(a, b):
+    s = 0.0
+    for i in range(len(a)):
+        d = a[i] - b[i]
+        s += d * d
+    return s
 
-    for c in numeric_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df[list(numeric_cols)] = df[list(numeric_cols)].fillna(0)
 
-    # genre -> 0/1
-    df[genre_cols] = df[genre_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+def get_feature_cols_from_knn(knn_path):
+    with open(knn_path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        header = next(reader)
 
-    X_num = df[list(numeric_cols)].to_numpy(dtype=np.float32)
-    if clip_scaled:
-        X_num = np.clip(X_num, clip_lo, clip_hi)
+    header = [clean_col(h) for h in header]
+    header_norm = [h.lower() for h in header]
 
-    X_gen = df[genre_cols].to_numpy(dtype=np.float32)
-    X = np.hstack([X_num, X_gen]).astype(np.float32)
+    if TARGET_COL not in header_norm:
+        raise ValueError(f"Không thấy cột '{TARGET_COL}' trong data_KNN.csv")
 
-    y = pd.to_numeric(df[target_col], errors="coerce").fillna(0).to_numpy(dtype=np.float32)
-    return X, y, list(numeric_cols), genre_cols
+    lower_to_clean = {h.lower(): h for h in header}
 
-class KNNRegressorChunked:
-    def __init__(self, k=50, weighted=True, eps=1e-8,
-                 batch_size=256, train_chunk_size=20000):
-        self.k = int(k)
-        self.weighted = bool(weighted)
-        self.eps = float(eps)
-        self.batch_size = int(batch_size)
-        self.train_chunk_size = int(train_chunk_size)
+    for c in NUM_COLS:
+        if c not in lower_to_clean:
+            raise ValueError(f"data_KNN.csv thiếu cột '{c}'")
 
-        self.X_train = None
-        self.y_train = None
-        self.train_norm = None
+    genre_cols = [h for h in header if norm_col(h).startswith("genre_")]
+    feature_cols = [lower_to_clean[c] for c in NUM_COLS] + genre_cols
+    target_clean = header[header_norm.index(TARGET_COL)]
+    return feature_cols, genre_cols, target_clean
 
-    def fit(self, X, y):
-        self.X_train = np.asarray(X, dtype=np.float32)
-        self.y_train = np.asarray(y, dtype=np.float32).reshape(-1)
-        self.train_norm = np.sum(self.X_train * self.X_train, axis=1)
-        return self
 
-    def predict(self, Xq):
-        Xq = np.asarray(Xq, dtype=np.float32)
-        n_train = self.X_train.shape[0]
-        k = min(self.k, n_train)
+def compute_scaler_from_raw(raw_path):
+    # Tính median fill + mean/std sau khi impute, cho 3 cột numeric
+    with open(raw_path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        header = next(reader)
+        header = [clean_col(h) for h in header]
+        header_norm = [h.lower() for h in header]
+        lower_to_clean = {h.lower(): h for h in header}
 
-        preds = np.empty((Xq.shape[0],), dtype=np.float32)
+        missing = [c for c in NUM_COLS if c not in header_norm]
+        if missing:
+            raise ValueError(f"data_raw.csv thiếu cột: {missing}")
 
-        for start in range(0, Xq.shape[0], self.batch_size):
-            end = min(start + self.batch_size, Xq.shape[0])
-            Q = Xq[start:end]
-            b = Q.shape[0]
+        num_clean = {c: lower_to_clean[c] for c in NUM_COLS}
+        dict_reader = csv.DictReader(f, fieldnames=header)
 
-            q_norm = np.sum(Q * Q, axis=1, keepdims=True)
+        num_vals = {c: [] for c in NUM_COLS}
+        rows_num = []
 
-            best_d2 = np.full((b, k), np.inf, dtype=np.float32)
-            best_y  = np.zeros((b, k), dtype=np.float32)
+        for row in dict_reader:
+            item = {}
+            for c in NUM_COLS:
+                v = to_float(row.get(num_clean[c], ""))
+                item[c] = v
+                if v is not None:
+                    num_vals[c].append(v)
+            rows_num.append(item)
 
-            for j in range(0, n_train, self.train_chunk_size):
-                T = self.X_train[j:j + self.train_chunk_size]
-                yT = self.y_train[j:j + self.train_chunk_size]
-                t_norm = self.train_norm[j:j + self.train_chunk_size][None, :]
+    fills = {c: median(num_vals[c]) for c in NUM_COLS}
+    scaler = {}
+    for c in NUM_COLS:
+        imputed = [(r[c] if r[c] is not None else fills[c]) for r in rows_num]
+        mu, sd = mean_std(imputed)
+        scaler[c] = (mu, sd, fills[c])  # mean, std, fill
+    return scaler
 
-                d2 = q_norm + t_norm - 2.0 * (Q @ T.T)
-                d2 = np.maximum(d2, 0.0)
 
-                c = d2.shape[1]
-                kk = min(k, c) 
+def knn_predict_from_knn_csv(knn_path, feature_cols, target_col, xq, k=5, weighted=True):
+    # streaming top-k
+    heap = []  # max-heap by dist2: store (-dist2, y)
 
-                idx = np.argpartition(d2, kth=kk-1, axis=1)[:, :kk]
-                d2_small = np.take_along_axis(d2, idx, axis=1)
-                y_small  = yT[idx]
+    with open(knn_path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            raise ValueError("data_KNN.csv không có header")
 
-                merged_d2 = np.concatenate([best_d2, d2_small], axis=1)
-                merged_y  = np.concatenate([best_y,  y_small],  axis=1)
+        # map original keys -> clean keys
+        orig_fields = list(reader.fieldnames)
+        clean_fields = [clean_col(h) for h in orig_fields]
+        clean_to_orig = {}
+        for o, c in zip(orig_fields, clean_fields):
+            if c not in clean_to_orig:
+                clean_to_orig[c] = o
 
-                sel = np.argpartition(merged_d2, kth=k-1, axis=1)[:, :k]
-                best_d2 = np.take_along_axis(merged_d2, sel, axis=1)
-                best_y  = np.take_along_axis(merged_y,  sel, axis=1)
+        target_key = clean_to_orig.get(target_col, target_col)
+        feature_keys = [clean_to_orig.get(c, c) for c in feature_cols]
 
-            if not self.weighted:
-                preds[start:end] = np.mean(best_y, axis=1)
+        for row in reader:
+            y = to_float(row.get(target_key))
+            if y is None:
+                continue
+
+            x = []
+            ok = True
+            for fk in feature_keys:
+                v = to_float(row.get(fk))
+                if v is None:
+                    ok = False
+                    break
+                x.append(v)
+            if not ok:
+                continue
+
+            dist2 = squared_distance(x, xq)
+
+            if len(heap) < k:
+                heapq.heappush(heap, (-dist2, y))
             else:
-                best_d = np.sqrt(best_d2)
-                w = 1.0 / (best_d + self.eps)
-                preds[start:end] = np.sum(w * best_y, axis=1) / np.sum(w, axis=1)
+                worst_dist2 = -heap[0][0]
+                if dist2 < worst_dist2:
+                    heapq.heapreplace(heap, (-dist2, y))
 
-        return preds
+    if not heap:
+        raise ValueError("Không tìm được neighbor hợp lệ trong data_KNN.csv")
+
+    neighbors = [(-dneg, y) for (dneg, y) in heap]  # (dist2, y)
+
+    if not weighted:
+        return sum(y for _, y in neighbors) / len(neighbors)
+
+    num = 0.0
+    den = 0.0
+    for dist2, y in neighbors:
+        w = 1.0 / (dist2 + EPS)
+        num += w * y
+        den += w
+    return num / den
+
+
+def build_query_vector_from_raw_inputs(feature_cols, genre_cols, scaler, budget, popularity, release_year, chosen_genres_set):
+    # raw -> z-score for NUM_COLS; genres 0/1
+    raw_num = {"budget": budget, "popularity": popularity, "release_year": release_year}
+
+    vec = []
+    for col in feature_cols:
+        cn = norm_col(col)
+        if cn in NUM_COLS:
+            mu, sd, fill = scaler[cn]
+            x = raw_num[cn]
+            if x is None:
+                x = fill
+            vec.append((x - mu) / sd)
+        elif cn.startswith("genre_"):
+            vec.append(1.0 if col in chosen_genres_set else 0.0)
+        else:
+            vec.append(0.0)
+    return vec
+
+
+# -------------------- Tkinter UI --------------------
+class ScrollableFrame(ttk.Frame):
+    def __init__(self, container, *args, **kwargs):
+        super().__init__(container, *args, **kwargs)
+        self.canvas = tk.Canvas(self, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.inner = ttk.Frame(self.canvas)
+
+        self.inner.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
+
+        self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.scrollbar.grid(row=0, column=1, sticky="ns")
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+
+class KNNApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("KNN Rating Predictor")
+        self.geometry("900x600")
+
+        try:
+            if not os.path.exists(RAW_PATH):
+                raise FileNotFoundError(f"Không thấy {RAW_PATH}")
+            if not os.path.exists(KNN_PATH):
+                raise FileNotFoundError(f"Không thấy {KNN_PATH}")
+
+            self.feature_cols, self.genre_cols, self.target_col = get_feature_cols_from_knn(KNN_PATH)
+            self.scaler = compute_scaler_from_raw(RAW_PATH)
+        except Exception as e:
+            messagebox.showerror("Lỗi load dữ liệu", str(e))
+            self.destroy()
+            return
+
+        self.selected = set()  # set of genre column names (e.g. "genre_Action")
+        self.genre_buttons = {}  # col -> Button
+
+        self._build_ui()
+
+    def _build_ui(self):
+        # Left: inputs
+        left = ttk.Frame(self, padding=12)
+        left.pack(side="left", fill="y")
+
+        ttk.Label(left, text="Nhập thông tin phim", font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 10))
+
+        # movie name (not used)
+        ttk.Label(left, text="Tên phim:").pack(anchor="w")
+        self.movie_name = ttk.Entry(left, width=35)
+        self.movie_name.pack(anchor="w", pady=(0, 10))
+
+        # numeric inputs
+        self.budget_var = tk.StringVar()
+        self.pop_var = tk.StringVar()
+        self.year_var = tk.StringVar()
+
+        ttk.Label(left, text="Budget:").pack(anchor="w")
+        ttk.Entry(left, textvariable=self.budget_var, width=35).pack(anchor="w", pady=(0, 8))
+
+        ttk.Label(left, text="Popularity:").pack(anchor="w")
+        ttk.Entry(left, textvariable=self.pop_var, width=35).pack(anchor="w", pady=(0, 8))
+
+        ttk.Label(left, text="Release year:").pack(anchor="w")
+        ttk.Entry(left, textvariable=self.year_var, width=35).pack(anchor="w", pady=(0, 10))
+
+        # K + weighted
+        self.k_var = tk.StringVar(value="5")
+        self.weighted_var = tk.BooleanVar(value=True)
+
+        row_k = ttk.Frame(left)
+        row_k.pack(anchor="w", pady=(0, 8))
+        ttk.Label(row_k, text="k:").pack(side="left")
+        ttk.Entry(row_k, textvariable=self.k_var, width=6).pack(side="left", padx=(6, 0))
+
+        ttk.Checkbutton(left, text="Weighted KNN", variable=self.weighted_var)\
+            .pack(anchor="w", pady=(0, 12))
+
+        ttk.Button(left, text="Dự đoán rating", command=self.on_predict).pack(anchor="w", fill="x")
+
+        self.result_lbl = ttk.Label(left, text="Rating dự đoán: -", font=("Segoe UI", 13, "bold"))
+        self.result_lbl.pack(anchor="w", pady=(14, 0))
+
+        # Right: genre cards
+        right = ttk.Frame(self, padding=12)
+        right.pack(side="right", fill="both", expand=True)
+
+        ttk.Label(right, text="Chọn thể loại", font=("Segoe UI", 14, "bold"))\
+            .pack(anchor="w", pady=(0, 10))
+
+        sf = ScrollableFrame(right)
+        sf.pack(fill="both", expand=True)
+
+        # build “cards” as toggle buttons in a grid
+        cols_per_row = 4
+        for idx, gc in enumerate(sorted(self.genre_cols)):
+            name = gc[len("genre_"):] if gc.lower().startswith("genre_") else gc
+
+            btn = tk.Button(
+                sf.inner,
+                text=name,
+                relief="raised",
+                bd=2,
+                padx=10,
+                pady=8,
+                command=lambda col=gc: self.toggle_genre(col),
+                wraplength=160
+            )
+            r = idx // cols_per_row
+            c = idx % cols_per_row
+            btn.grid(row=r, column=c, sticky="ew", padx=6, pady=6)
+            sf.inner.grid_columnconfigure(c, weight=1)
+            self.genre_buttons[gc] = btn
+
+    def toggle_genre(self, genre_col):
+        if genre_col in self.selected:
+            self.selected.remove(genre_col)
+            self._set_button_state(self.genre_buttons[genre_col], selected=False)
+        else:
+            self.selected.add(genre_col)
+            self._set_button_state(self.genre_buttons[genre_col], selected=True)
+
+    def _set_button_state(self, btn: tk.Button, selected: bool):
+        # simple “card selected” effect
+        if selected:
+            btn.config(relief="sunken")
+        else:
+            btn.config(relief="raised")
+
+    def on_predict(self):
+        # parse inputs
+        budget = to_float(self.budget_var.get())
+        popularity = to_float(self.pop_var.get())
+        year = to_float(self.year_var.get())
+
+        # allow blank -> use median fill (like your preprocessing)
+        try:
+            k = int(self.k_var.get().strip() or "5")
+            if k <= 0:
+                raise ValueError
+        except Exception:
+            messagebox.showerror("Input lỗi", "k phải là số nguyên dương.")
+            return
+
+        weighted = bool(self.weighted_var.get())
+
+        try:
+            xq = build_query_vector_from_raw_inputs(
+                self.feature_cols, self.genre_cols, self.scaler,
+                budget, popularity, year,
+                self.selected
+            )
+            pred = knn_predict_from_knn_csv(
+                KNN_PATH, self.feature_cols, self.target_col,
+                xq, k=k, weighted=weighted
+            )
+            self.result_lbl.config(text=f"Rating dự đoán: {pred:.4f}")
+        except Exception as e:
+            messagebox.showerror("Lỗi dự đoán", str(e))
+
 
 if __name__ == "__main__":
-    BASE_DIR = Path(__file__).resolve().parents[2]
-    csv_path = BASE_DIR / "data" / "data.csv" 
-
-    print("Reading:", csv_path)
-    df = pd.read_csv(csv_path, low_memory=False)
-    df.columns = df.columns.str.strip()
-
-    df_train, df_test = train_test_split(df, test_size=0.2, seed=42)
-
-    X_train, y_train, num_cols, gen_cols = build_X_y_scaled(df_train, clip_scaled=True, clip_lo=-5, clip_hi=5)
-    X_test,  y_test,  _,       _        = build_X_y_scaled(df_test,  clip_scaled=True, clip_lo=-5, clip_hi=5)
-
-    print("Using numeric columns (scaled):", num_cols)
-    print("X_train shape:", X_train.shape, "| X_test shape:", X_test.shape)
-
-    model = KNNRegressorChunked(k=50, weighted=True, batch_size=256, train_chunk_size=20000)
-    model.fit(X_train, y_train)
-
-    y_pred = model.predict(X_test)
-    print(f"RMSE: {rmse(y_test, y_pred):.4f}")
-    print(f"MAE : {mae(y_test, y_pred):.4f}")
-
-    genre_to_idx = {g.replace("genre_", ""): i for i, g in enumerate(gen_cols)}
-    available_genres = sorted(genre_to_idx.keys())
-
-    print("\n===== PREDICT ONE MOVIE (SCALED INPUT) =====")
-    print("Nhập từng thông số (đều là SCALED như data.csv). Gõ 'q' để thoát.\n")
-    print("Genres hợp lệ:", ", ".join(available_genres), "\n")
-
-    while True:
-        s = input("budget (scaled): ").strip()
-        if s.lower() in ("q", "quit", "exit"):
-            break
-        try:
-            b = float(s)
-        except ValueError:
-            print("❌ budget không hợp lệ.\n")
-            continue
-
-        s = input("popularity (scaled): ").strip()
-        if s.lower() in ("q", "quit", "exit"):
-            break
-        try:
-            p = float(s)
-        except ValueError:
-            print("❌ popularity không hợp lệ.\n")
-            continue
-
-        s = input("release_year (scaled): ").strip()
-        if s.lower() in ("q", "quit", "exit"):
-            break
-        try:
-            y = float(s)
-        except ValueError:
-            print("❌ release_year không hợp lệ.\n")
-            continue
-
-        genres_in = input("genres (comma, vd: Action,Drama): ").strip()
-        genres = [norm_genre_name(x) for x in genres_in.split(",") if x.strip()] if genres_in else []
-
-        x_num = np.clip(np.array([b, p, y], dtype=np.float32), -5.0, 5.0)
-
-        x_gen = np.zeros((len(gen_cols),), dtype=np.float32)
-        unknown = []
-        for g in genres:
-            if g in genre_to_idx:
-                x_gen[genre_to_idx[g]] = 1.0
-            else:
-                unknown.append(g)
-
-        if unknown:
-            print("⚠️ Genre không có trong dataset (bỏ qua):", unknown)
-
-        X_one = np.hstack([x_num, x_gen])[None, :].astype(np.float32)
-        pred = float(model.predict(X_one)[0])
-        pred_clamped = max(1.0, min(5.0, pred))
-        print(f"✅ Predicted rating: {pred:.4f} | (clamped 1..5): {pred_clamped:.4f}\n")
+    app = KNNApp()
+    app.mainloop()
