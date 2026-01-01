@@ -1,249 +1,260 @@
-# Cao Minh Đạt - 23162015
+# Cao Minh Đạt - 23162015 
+
+from __future__ import annotations
+
+import re
+import difflib
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
-
-def train_test_split_np(X, y, test_size=0.2, seed=42):
-    rng = np.random.default_rng(seed)
-    idx = np.arange(len(X))
-    rng.shuffle(idx)
-    n_test = int(len(X) * test_size)
-    test_idx = idx[:n_test]
-    train_idx = idx[n_test:]
-    return X[train_idx], X[test_idx], y[train_idx], y[test_idx]
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
 
 
-def mse(y_true, y_pred):
-    y_true = np.asarray(y_true, dtype=float)
-    y_pred = np.asarray(y_pred, dtype=float)
-    return float(np.mean((y_true - y_pred) ** 2))
+def rmse(y_true, y_pred) -> float:
+    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
 
 
-def r2_score_np(y_true, y_pred):
-    y_true = np.asarray(y_true, dtype=float)
-    y_pred = np.asarray(y_pred, dtype=float)
-    u = np.sum((y_true - y_pred) ** 2)
-    v = np.sum((y_true - np.mean(y_true)) ** 2)
-    return float(1.0 - u / v) if v != 0 else 0.0
+def mae(y_true, y_pred) -> float:
+    return float(mean_absolute_error(y_true, y_pred))
 
 
+def find_csv_upwards(start: Path, rel_path: str = "data/data.csv", max_up: int = 6) -> Path:
+    """
+    Try to find rel_path by walking up from 'start' directory.
+    """
+    cur = start
+    for _ in range(max_up + 1):
+        candidate = cur / rel_path
+        if candidate.exists():
+            return candidate
+        cur = cur.parent
+    raise FileNotFoundError(
+        f"Không tìm thấy '{rel_path}' khi dò từ: {start}\n"
+        f"Gợi ý: hãy truyền đúng đường dẫn hoặc đặt file theo cấu trúc: <project>/data/data.csv"
+    )
 
-class _TreeNode:
-    __slots__ = ("feature", "threshold", "left", "right", "value")
 
-    def __init__(self, feature=None, threshold=None, left=None, right=None, value=None):
-        self.feature = feature
-        self.threshold = threshold
-        self.left = left
-        self.right = right
-        self.value = value  
+def canonical_genre_key(s: str) -> str:
+    """
+    Normalize a genre string so input is case-insensitive and tolerant to spaces/hyphens.
+    Examples:
+      'Action' -> 'action'
+      'Sci-Fi' -> 'sci_fi'
+      'Science Fiction' -> 'science_fiction'
+    """
+    s = s.strip().lower()
+    s = s.replace("-", "_")
+    s = re.sub(r"\s+", "_", s)              
+    s = re.sub(r"[^a-z0-9_]", "", s)        
+    s = re.sub(r"_+", "_", s).strip("_")    
+    return s
 
 
-class DecisionTreeRegressorScratch:
-    def __init__(
-        self,
-        max_depth=None,
-        min_samples_split=2,
-        min_samples_leaf=1,
-        max_features=None,
-        random_state=None,
-    ):
-        self.max_depth = max_depth
-        self.min_samples_split = int(min_samples_split)
-        self.min_samples_leaf = int(min_samples_leaf)
-        self.max_features = max_features  
-        self.rng = np.random.default_rng(random_state)
-        self.root = None
+def build_feature_schema(
+    df: pd.DataFrame,
+    target_col: str = "rating",
+    numeric_cols: tuple[str, ...] = ("budget", "popularity", "release_year"),
+    genre_prefix: str = "genre_",
+) -> tuple[list[str], list[str], list[str]]:
+    """
+    Decide which columns to use, and their exact order.
+    Returns: (feature_cols, numeric_cols_list, genre_cols)
+    """
+    df = df.copy()
+    df.columns = df.columns.str.strip()
 
-    def fit(self, X, y):
-        X = np.asarray(X, dtype=float)
-        y = np.asarray(y, dtype=float).reshape(-1)
-        self.root = self._build_tree(X, y, depth=0)
-        return self
+    if target_col not in df.columns:
+        raise ValueError(f"Missing target column: {target_col}")
 
-    def predict(self, X):
-        X = np.asarray(X, dtype=float)
-        return np.array([self._predict_one(row, self.root) for row in X], dtype=float)
+    genre_cols = [c for c in df.columns if c.startswith(genre_prefix)]
+    if not genre_cols:
+        raise ValueError(f"No columns found with prefix '{genre_prefix}'")
 
-    def _predict_one(self, x, node):
-        while node.value is None:
-            if x[node.feature] <= node.threshold:
-                node = node.left
-            else:
-                node = node.right
-        return node.value
+  
+    num_cols = []
+    for c in numeric_cols:
+        if c not in df.columns:
+            raise ValueError(f"Missing numeric column: {c}")
+        num_cols.append(c)
 
-    def _stop(self, y, depth, n_samples):
-        if n_samples < self.min_samples_split:
-            return True
-        if self.max_depth is not None and depth >= self.max_depth:
-            return True
-        if np.allclose(y, y[0]):
-            return True
-        return False
+    feature_cols = num_cols + sorted(genre_cols) 
+    return feature_cols, num_cols, sorted(genre_cols)
 
-    def _feature_subset(self, n_features):
-        mf = self.max_features
-        if mf is None:
-            return np.arange(n_features)
-        if mf == "sqrt":
-            k = max(1, int(np.sqrt(n_features)))
-        elif isinstance(mf, int):
-            k = max(1, min(n_features, mf))
+
+def prepare_X_y(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    numeric_cols: list[str],
+    genre_cols: list[str],
+    target_col: str = "rating",
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Clean + build X, y with consistent columns/order.
+    """
+    df = df.copy()
+    df.columns = df.columns.str.strip()
+
+    y = pd.to_numeric(df[target_col], errors="coerce")
+    mask = y.notna()
+    df = df.loc[mask].copy()
+    y = y.loc[mask].astype(np.float32).to_numpy()
+
+    df = df.reindex(columns=feature_cols, fill_value=0)
+
+    for c in numeric_cols:
+        col = pd.to_numeric(df[c], errors="coerce")
+        med = float(col.median()) if col.notna().any() else 0.0
+        df[c] = col.fillna(med)
+
+    for c in genre_cols:
+        col = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        df[c] = col.clip(0, 1)
+
+    X = df[feature_cols].astype(np.float32).to_numpy()
+    return X, y
+
+
+def build_one_movie_vector(
+    budget: float,
+    popularity: float,
+    release_year: float,
+    genres_in: list[str],
+    feature_cols: list[str],
+    numeric_cols: list[str],
+    genre_cols: list[str],
+    genre_prefix: str = "genre_",
+) -> np.ndarray:
+    """
+    Create a single-row X vector following the trained schema.
+    """
+    row = {c: 0.0 for c in feature_cols}
+    row[numeric_cols[0]] = float(budget)
+    row[numeric_cols[1]] = float(popularity)
+    row[numeric_cols[2]] = float(release_year)
+
+    canon_to_col = {}
+    for col in genre_cols:
+        k = canonical_genre_key(col[len(genre_prefix):])
+        canon_to_col[k] = col
+
+    unknown = []
+    for g in genres_in:
+        kg = canonical_genre_key(g)
+        if kg in canon_to_col:
+            row[canon_to_col[kg]] = 1.0
         else:
-            k = n_features
-        return self.rng.choice(n_features, size=k, replace=False)
+            unknown.append(g)
 
-    def _best_split(self, X, y, feature_indices):
-        n_samples, _ = X.shape
+    if unknown:
+        candidates = sorted(canon_to_col.keys())
+        suggestions = {}
+        for g in unknown:
+            kg = canonical_genre_key(g)
+            close = difflib.get_close_matches(kg, candidates, n=5, cutoff=0.6)
+            suggestions[g] = close
 
-        best_feat, best_thr = None, None
-        best_loss = np.inf
+        print(" Genre không có trong dataset:", unknown)
+        for g, close in suggestions.items():
+            if close:
+                print(f"   ↳ Gợi ý cho '{g}': {', '.join(close)}")
 
-        y_sum = y.sum()
-        y_sq_sum = (y * y).sum()
+    X_one = np.array([row[c] for c in feature_cols], dtype=np.float32)[None, :]
+    return X_one
 
-        def sse(count, sum_, sq_sum):
-            if count <= 0:
-                return 0.0
-            return float(sq_sum - (sum_ * sum_) / count)
-
-        for f in feature_indices:
-            x = X[:, f]
-            order = np.argsort(x)
-            x_sorted = x[order]
-            y_sorted = y[order]
-
-            unique_mask = np.diff(x_sorted) != 0
-            if not np.any(unique_mask):
-                continue
-
-            left_count = 0
-            left_sum = 0.0
-            left_sq_sum = 0.0
-
-            for i in range(0, n_samples - 1):
-                yi = y_sorted[i]
-                left_count += 1
-                left_sum += yi
-                left_sq_sum += yi * yi
-
-                if x_sorted[i] == x_sorted[i + 1]:
-                    continue
-
-                right_count = n_samples - left_count
-                if left_count < self.min_samples_leaf or right_count < self.min_samples_leaf:
-                    continue
-
-                right_sum = y_sum - left_sum
-                right_sq_sum = y_sq_sum - left_sq_sum
-
-                loss = sse(left_count, left_sum, left_sq_sum) + sse(right_count, right_sum, right_sq_sum)
-                if loss < best_loss:
-                    best_loss = loss
-                    best_feat = f
-                    best_thr = (x_sorted[i] + x_sorted[i + 1]) / 2.0
-
-        return best_feat, best_thr
-
-    def _build_tree(self, X, y, depth):
-        n_samples, n_features = X.shape
-
-        if self._stop(y, depth, n_samples):
-            return _TreeNode(value=float(np.mean(y)))
-
-        feature_indices = self._feature_subset(n_features)
-        feat, thr = self._best_split(X, y, feature_indices)
-
-        if feat is None:
-            return _TreeNode(value=float(np.mean(y)))
-
-        left_mask = X[:, feat] <= thr
-        right_mask = ~left_mask
-
-        if left_mask.sum() == 0 or right_mask.sum() == 0:
-            return _TreeNode(value=float(np.mean(y)))
-
-        left = self._build_tree(X[left_mask], y[left_mask], depth + 1)
-        right = self._build_tree(X[right_mask], y[right_mask], depth + 1)
-        return _TreeNode(feature=feat, threshold=float(thr), left=left, right=right)
-
-class RandomForestRegressorScratch:
-    def __init__(
-        self,
-        n_estimators=50,
-        max_depth=None,
-        min_samples_split=2,
-        min_samples_leaf=1,
-        max_features="sqrt",
-        bootstrap=True,
-        random_state=42,
-    ):
-        self.n_estimators = int(n_estimators)
-        self.max_depth = max_depth
-        self.min_samples_split = int(min_samples_split)
-        self.min_samples_leaf = int(min_samples_leaf)
-        self.max_features = max_features
-        self.bootstrap = bool(bootstrap)
-        self.rng = np.random.default_rng(random_state)
-        self.trees = []
-
-    def fit(self, X, y):
-        X = np.asarray(X, dtype=float)
-        y = np.asarray(y, dtype=float).reshape(-1)
-
-        n_samples = len(X)
-        self.trees = []
-
-        for _ in range(self.n_estimators):
-            if self.bootstrap:
-                idx = self.rng.integers(0, n_samples, size=n_samples)
-                Xb = X[idx]
-                yb = y[idx]
-            else:
-                Xb, yb = X, y
-
-            tree = DecisionTreeRegressorScratch(
-                max_depth=self.max_depth,
-                min_samples_split=self.min_samples_split,
-                min_samples_leaf=self.min_samples_leaf,
-                max_features=self.max_features,
-                random_state=int(self.rng.integers(0, 1_000_000_000)),
-            )
-            tree.fit(Xb, yb)
-            self.trees.append(tree)
-
-        return self
-
-    def predict(self, X):
-        X = np.asarray(X, dtype=float)
-        preds = np.stack([t.predict(X) for t in self.trees], axis=0)  # (n_trees, n_samples)
-        return np.mean(preds, axis=0)
 
 if __name__ == "__main__":
-    data = pd.read_csv("ratings_small.csv")
+    script_dir = Path(__file__).resolve().parent
+    csv_path = find_csv_upwards(script_dir, rel_path="data/data.csv", max_up=8)
 
-    X = data[["userId", "movieId"]].values
-    y = data["rating"].values
+    print("Reading:", csv_path)
+    df = pd.read_csv(csv_path, low_memory=False)
 
-    X_train, X_test, y_train, y_test = train_test_split_np(X, y, test_size=0.2, seed=42)
+    feature_cols, num_cols, gen_cols = build_feature_schema(
+        df,
+        target_col="rating",
+        numeric_cols=("budget", "popularity", "release_year"),
+        genre_prefix="genre_",
+    )
 
-    model = RandomForestRegressorScratch(
-        n_estimators=100,        
-        max_depth=20,           
-        min_samples_split=10,
-        min_samples_leaf=5,
-        max_features="sqrt",
-        bootstrap=True,
+    df_train, df_test = train_test_split(df, test_size=0.2, random_state=42)
+
+    X_train, y_train = prepare_X_y(df_train, feature_cols, num_cols, gen_cols, target_col="rating")
+    X_test, y_test = prepare_X_y(df_test, feature_cols, num_cols, gen_cols, target_col="rating")
+
+    print("Numeric features:", num_cols)
+    print("Number of genre features:", len(gen_cols))
+    print("X_train shape:", X_train.shape)
+    print("X_test shape :", X_test.shape)
+
+    
+    model = RandomForestRegressor(
+        n_estimators=200,
+        max_depth=10,
+        max_features=0.2,      
+        min_samples_split=2,
+        min_samples_leaf=1,
         random_state=42,
+        n_jobs=-1,
+        oob_score=False,
+        bootstrap=True,
     )
 
     model.fit(X_train, y_train)
 
     y_pred = model.predict(X_test)
-    print("MSE:", mse(y_test, y_pred))
-    print("R2 :", r2_score_np(y_test, y_pred))
+    print(f"RMSE: {rmse(y_test, y_pred):.4f}")
+    print(f"MAE : {mae(y_test, y_pred):.4f}")
+    print(f"R2  : {r2_score(y_test, y_pred):.4f}")
 
-    sample = np.array([[1, 31]], dtype=float)
-    print("Predicted rating :", float(model.predict(sample)[0]))
 
+    valid_genres = [canonical_genre_key(c.replace("genre_", "")) for c in gen_cols]
+    valid_genres = sorted(set(valid_genres))
+
+    print("\n===== PREDICT ONE MOVIE =====")
+    print("Genres hợp lệ :")
+    print(", ".join(valid_genres), "\n")
+
+    while True:
+        s = input("budget (q để thoát): ").strip()
+        if s.lower() in ("q", "quit", "exit"):
+            break
+        try:
+            budget = float(s)
+        except ValueError:
+            print(" budget không hợp lệ\n")
+            continue
+
+        s = input("popularity: ").strip()
+        try:
+            popularity = float(s)
+        except ValueError:
+            print(" popularity không hợp lệ\n")
+            continue
+
+        s = input("release_year: ").strip()
+        try:
+            release_year = float(s)
+        except ValueError:
+            print(" release_year không hợp lệ\n")
+            continue
+
+        genres_in = input("genres (vd: Action,Drama hoặc sci-fi, science fiction): ").strip()
+        genres = [g.strip() for g in genres_in.split(",") if g.strip()]
+
+        X_one = build_one_movie_vector(
+            budget=budget,
+            popularity=popularity,
+            release_year=release_year,
+            genres_in=genres,
+            feature_cols=feature_cols,
+            numeric_cols=num_cols,
+            genre_cols=gen_cols,
+            genre_prefix="genre_",
+        )
+
+        pred = float(model.predict(X_one)[0])
+        pred_clamped = max(1.0, min(5.0, pred))
+        print(f" Predicted rating: {pred:.4f} \n")
