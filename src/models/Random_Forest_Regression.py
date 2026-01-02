@@ -191,11 +191,11 @@ if __name__ == "__main__":
 
     
     model = RandomForestRegressor(
-        n_estimators=200,
-        max_depth=10,
+        n_estimators=10000,
+        max_depth=None,
         max_features=0.2,      
         min_samples_split=2,
-        min_samples_leaf=1,
+        min_samples_leaf=2,
         random_state=42,
         n_jobs=-1,
         oob_score=False,
@@ -204,8 +204,13 @@ if __name__ == "__main__":
 
     model.fit(X_train, y_train)
 
+    y_pred_train = model.predict(X_train)
+    print(f"RMSE (TRAIN): {rmse(y_train, y_pred_train):.4f}")
+
+    y_pred_test = model.predict(X_test)
+    print(f"RMSE (TEST) : {rmse(y_test, y_pred_test):.4f}")
+
     y_pred = model.predict(X_test)
-    print(f"RMSE: {rmse(y_test, y_pred):.4f}")
     print(f"MAE : {mae(y_test, y_pred):.4f}")
     print(f"R2  : {r2_score(y_test, y_pred):.4f}")
 
