@@ -1,265 +1,247 @@
-# Cao Minh Đạt - 23162015 
+# Cao Minh Đạt - 23162015
 
-from __future__ import annotations
-
-import re
-import difflib
-from pathlib import Path
-
+import sys
 import numpy as np
 import pandas as pd
+from pathlib import Path
+
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 
-def rmse(y_true, y_pred) -> float:
-    return float(np.sqrt(mean_squared_error(y_true, y_pred)))
+def find_data_csv(filename: str) -> Path:
+    p = Path(filename)
+    if p.exists():
+        return p.resolve()
 
+    here = Path(__file__).resolve()
+    for parent in [here.parent] + list(here.parents):
+        cand = parent / "data" / filename
+        if cand.exists():
+            return cand.resolve()
 
-def mae(y_true, y_pred) -> float:
-    return float(mean_absolute_error(y_true, y_pred))
-
-
-def find_csv_upwards(start: Path, rel_path: str = "data/data.csv", max_up: int = 6) -> Path:
-    """
-    Try to find rel_path by walking up from 'start' directory.
-    """
-    cur = start
-    for _ in range(max_up + 1):
-        candidate = cur / rel_path
-        if candidate.exists():
-            return candidate
-        cur = cur.parent
     raise FileNotFoundError(
-        f"Không tìm thấy '{rel_path}' khi dò từ: {start}\n"
-        f"Gợi ý: hãy truyền đúng đường dẫn hoặc đặt file theo cấu trúc: <project>/data/data.csv"
+        f"Không tìm thấy file: '{filename}'.\n"
+        # f"- Hãy đặt file vào thư mục 'data/' của project hoặc truyền đường dẫn đầy đủ.\n"
+        # f"- Vị trí code hiện tại: {here}"
     )
 
 
-def canonical_genre_key(s: str) -> str:
-    """
-    Normalize a genre string so input is case-insensitive and tolerant to spaces/hyphens.
-    Examples:
-      'Action' -> 'action'
-      'Sci-Fi' -> 'sci_fi'
-      'Science Fiction' -> 'science_fiction'
-    """
-    s = s.strip().lower()
-    s = s.replace("-", "_")
-    s = re.sub(r"\s+", "_", s)              
-    s = re.sub(r"[^a-z0-9_]", "", s)        
-    s = re.sub(r"_+", "_", s).strip("_")    
-    return s
+def split_60_20_20(n, seed=42):
+    rng = np.random.default_rng(seed)
+    idx = np.arange(n)
+    rng.shuffle(idx)
+    n_train = int(0.60 * n)
+    n_val = int(0.20 * n)
+    train_idx = idx[:n_train]
+    val_idx = idx[n_train:n_train + n_val]
+    test_idx = idx[n_train + n_val:]
+    return train_idx, val_idx, test_idx
 
 
-def build_feature_schema(
-    df: pd.DataFrame,
-    target_col: str = "rating",
-    numeric_cols: tuple[str, ...] = ("budget", "popularity", "release_year"),
-    genre_prefix: str = "genre_",
-) -> tuple[list[str], list[str], list[str]]:
-    """
-    Decide which columns to use, and their exact order.
-    Returns: (feature_cols, numeric_cols_list, genre_cols)
-    """
-    df = df.copy()
-    df.columns = df.columns.str.strip()
-
-    if target_col not in df.columns:
-        raise ValueError(f"Missing target column: {target_col}")
-
-    genre_cols = [c for c in df.columns if c.startswith(genre_prefix)]
-    if not genre_cols:
-        raise ValueError(f"No columns found with prefix '{genre_prefix}'")
-
-  
-    num_cols = []
-    for c in numeric_cols:
-        if c not in df.columns:
-            raise ValueError(f"Missing numeric column: {c}")
-        num_cols.append(c)
-
-    feature_cols = num_cols + sorted(genre_cols) 
-    return feature_cols, num_cols, sorted(genre_cols)
+def export_pred_csv(path: Path, original_idx, y_pred, y_true, pred_col_name="pred_rf"):
+    out = pd.DataFrame(
+        {
+            "original_row_index": original_idx.astype(int),
+            pred_col_name: np.asarray(y_pred, dtype=float),
+            "rating_true": np.asarray(y_true, dtype=float),
+        }
+    ).sort_values("original_row_index", kind="mergesort")
+    out.to_csv(path, index=False)
+    print(f"\nSaved: {path}")
+    print(out.head(10).to_string(index=False))
 
 
-def prepare_X_y(
-    df: pd.DataFrame,
-    feature_cols: list[str],
-    numeric_cols: list[str],
-    genre_cols: list[str],
-    target_col: str = "rating",
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Clean + build X, y with consistent columns/order.
-    """
-    df = df.copy()
-    df.columns = df.columns.str.strip()
+def load_selected_features(csv_path: Path):
+    df = pd.read_csv(csv_path)
 
-    y = pd.to_numeric(df[target_col], errors="coerce")
-    mask = y.notna()
-    df = df.loc[mask].copy()
-    y = y.loc[mask].astype(np.float32).to_numpy()
+    target = "rating"
+    required_numeric = ["budget", "popularity", "release_year"]
+    genre_cols = sorted([c for c in df.columns if c.startswith("genre_")])
 
-    df = df.reindex(columns=feature_cols, fill_value=0)
+    feature_cols = required_numeric + genre_cols
 
-    for c in numeric_cols:
-        col = pd.to_numeric(df[c], errors="coerce")
-        med = float(col.median()) if col.notna().any() else 0.0
-        df[c] = col.fillna(med)
+    missing = [c for c in required_numeric + [target] if c not in df.columns]
+    if missing:
+        raise ValueError(f"Thiếu cột bắt buộc: {missing}\nHiện có: {list(df.columns)[:40]} ...")
 
+    for c in feature_cols + [target]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df = df.dropna(subset=[target]).copy()
+
+    for c in required_numeric:
+        df[c] = df[c].fillna(df[c].median())
     for c in genre_cols:
-        col = pd.to_numeric(df[c], errors="coerce").fillna(0)
-        df[c] = col.clip(0, 1)
+        df[c] = df[c].fillna(0.0)
 
-    X = df[feature_cols].astype(np.float32).to_numpy()
-    return X, y
+    X = df[feature_cols].to_numpy(dtype=float)
+    y = df[target].to_numpy(dtype=float)
+
+    return df, X, y, feature_cols
 
 
-def build_one_movie_vector(
-    budget: float,
-    popularity: float,
-    release_year: float,
-    genres_in: list[str],
-    feature_cols: list[str],
-    numeric_cols: list[str],
-    genre_cols: list[str],
-    genre_prefix: str = "genre_",
-) -> np.ndarray:
-    """
-    Create a single-row X vector following the trained schema.
-    """
-    row = {c: 0.0 for c in feature_cols}
-    row[numeric_cols[0]] = float(budget)
-    row[numeric_cols[1]] = float(popularity)
-    row[numeric_cols[2]] = float(release_year)
+def cross_validate_oof_rf(
+    X, y,
+    n_folds=5,
+    shuffle=True,
+    random_state=42,
+    rf_params=None,
+    verbose=True
+):
+    
+    X = np.asarray(X, dtype=float)
+    y = np.asarray(y, dtype=float).reshape(-1)
+    n = X.shape[0]
 
-    canon_to_col = {}
-    for col in genre_cols:
-        k = canonical_genre_key(col[len(genre_prefix):])
-        canon_to_col[k] = col
+    idx = np.arange(n)
+    if shuffle:
+        rng = np.random.default_rng(random_state)
+        rng.shuffle(idx)
 
-    unknown = []
-    for g in genres_in:
-        kg = canonical_genre_key(g)
-        if kg in canon_to_col:
-            row[canon_to_col[kg]] = 1.0
-        else:
-            unknown.append(g)
+    fold_sizes = np.full(n_folds, n // n_folds, dtype=int)
+    fold_sizes[: n % n_folds] += 1
 
-    if unknown:
-        candidates = sorted(canon_to_col.keys())
-        suggestions = {}
-        for g in unknown:
-            kg = canonical_genre_key(g)
-            close = difflib.get_close_matches(kg, candidates, n=5, cutoff=0.6)
-            suggestions[g] = close
+    oof = np.zeros(n, dtype=float)
+    fold_r2, fold_mse = [], []
 
-        print(" Genre không có trong dataset:", unknown)
-        for g, close in suggestions.items():
-            if close:
-                print(f"   ↳ Gợi ý cho '{g}': {', '.join(close)}")
+    cur = 0
+    for f in range(n_folds):
+        vs = cur
+        ve = cur + fold_sizes[f]
+        val_idx = idx[vs:ve]
+        tr_idx = np.concatenate([idx[:vs], idx[ve:]])
 
-    X_one = np.array([row[c] for c in feature_cols], dtype=np.float32)[None, :]
-    return X_one
+        X_tr, y_tr = X[tr_idx], y[tr_idx]
+        X_val, y_val = X[val_idx], y[val_idx]
+
+        model = RandomForestRegressor(**(rf_params or {}))
+        model.fit(X_tr, y_tr)
+        pred = model.predict(X_val)
+
+        oof[val_idx] = pred
+        fold_r2.append(r2_score(y_val, pred))
+        fold_mse.append(mean_squared_error(y_val, pred))
+
+        cur = ve
+
+    if verbose:
+        for i, (r2v, msev) in enumerate(zip(fold_r2, fold_mse), start=1):
+            print(f"Fold {i}: R² = {r2v:.4f} | MSE = {msev:.4f}")
+        print("=" * 50)
+        print(f"Mean R²: {float(np.mean(fold_r2)):.4f} (+/- {float(np.std(fold_r2)):.4f})")
+        print("=" * 50)
+        print(f"OOF MSE: {mean_squared_error(y, oof):.4f}")
+        print(f"OOF R²:  {r2_score(y, oof):.4f}")
+
+    return oof, fold_r2, fold_mse
+
+
+def run_export_pred_rf_for_stacking(data_filename="data_KNN_new.csv", n_folds=5, seed=42):
+    csv_path = find_data_csv(data_filename)
+    df, X, y, feature_cols = load_selected_features(csv_path)
+
+    print(f"Loaded: {csv_path}")
+    print(f"Samples: {len(df)} | Features: {len(feature_cols)}")
+    print("First cols:", feature_cols[:10], "..." if len(feature_cols) > 10 else "")
+
+    train_idx, val_idx, test_idx = split_60_20_20(len(X), seed=seed)
+
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_val, y_val = X[val_idx], y[val_idx]
+    X_test, y_test = X[test_idx], y[test_idx]
+
+    rf_params = dict(
+        n_estimators=1000,
+        max_depth=None,
+        max_features=0.33,
+        min_samples_split=2,
+        min_samples_leaf=1,
+        random_state=seed,
+        n_jobs=-1,
+        bootstrap=True,
+        oob_score=False,
+    )
+
+    oof_train, _, _ = cross_validate_oof_rf(
+        X_train, y_train,
+        n_folds=n_folds,
+        shuffle=True,
+        random_state=seed,
+        rf_params=rf_params,
+        verbose=True
+    )
+
+    model = RandomForestRegressor(**rf_params)
+    model.fit(X_train, y_train)
+
+    pred_train = model.predict(X_train)
+    pred_val = model.predict(X_val)
+    pred_test = model.predict(X_test)
+
+    train_mse = mean_squared_error(y_train, pred_train)
+    val_mse = mean_squared_error(y_val, pred_val)
+    test_mse = mean_squared_error(y_test, pred_test)
+
+    train_rmse = np.sqrt(train_mse)
+    val_rmse = np.sqrt(val_mse)
+    test_rmse = np.sqrt(test_mse)
+
+    train_r2 = r2_score(y_train, pred_train)
+    val_r2 = r2_score(y_val, pred_val)
+    test_r2 = r2_score(y_test, pred_test)
+
+    test_mae = mean_absolute_error(y_test, pred_test)
+
+    print(f"\nTrain samples: {len(y_train)} | Val: {len(y_val)} | Test: {len(y_test)}")
+    print(f"Train RMSE={train_rmse:.4f} | R²={train_r2:.4f}")
+    print(f"Val   RMSE={val_rmse:.4f} | R²={val_r2:.4f}")
+    print(f"Test  RMSE={test_rmse:.4f} | R²={test_r2:.4f} | MAE={test_mae:.4f}")
+
+    print(f"\n{'i':<4} {'y_true':>8} {'y_pred':>10} {'abs_err':>10}")
+    print("-" * 36)
+    for i in range(min(10, len(y_test))):
+        ae = abs(y_test[i] - pred_test[i])
+        print(f"{i:<4} {y_test[i]:>8.2f} {pred_test[i]:>10.2f} {ae:>10.2f}")
+    print("-" * 36)
+
+    out_dir = csv_path.parent
+    export_pred_csv(out_dir / "oof_rf_train.csv", train_idx, oof_train, y_train, pred_col_name="oof_pred_rf")
+    export_pred_csv(out_dir / "val_rf.csv", val_idx, pred_val, y_val, pred_col_name="pred_rf")
+    export_pred_csv(out_dir / "test_rf.csv", test_idx, pred_test, y_test, pred_col_name="pred_rf")
+
+    out_npz = out_dir / "pred_rf_60_20_20.npz"
+    np.savez(
+        out_npz,
+        oof_train=oof_train,
+        pred_train=pred_train,
+        pred_val=pred_val,
+        pred_test=pred_test,
+        y_train=y_train,
+        y_val=y_val,
+        y_test=y_test,
+        train_idx=train_idx,
+        val_idx=val_idx,
+        test_idx=test_idx,
+        feature_cols=np.array(feature_cols, dtype=object),
+        rf_params=np.array([str(rf_params)], dtype=object),
+    )
+    print(f"\nSaved NPZ: {out_npz}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
-    script_dir = Path(__file__).resolve().parent
-    csv_path = find_csv_upwards(script_dir, rel_path="data/data.csv", max_up=8)
+    data_file = "data_KNN_new.csv"
+    k = 5
+    seed = 42
 
-    print("Reading:", csv_path)
-    df = pd.read_csv(csv_path, low_memory=False)
+    args = sys.argv[1:]
+    if "--data" in args:
+        data_file = args[args.index("--data") + 1]
+    if "--k" in args:
+        k = int(args[args.index("--k") + 1])
+    if "--seed" in args:
+        seed = int(args[args.index("--seed") + 1])
 
-    feature_cols, num_cols, gen_cols = build_feature_schema(
-        df,
-        target_col="rating",
-        numeric_cols=("budget", "popularity", "release_year"),
-        genre_prefix="genre_",
-    )
-
-    df_train, df_test = train_test_split(df, test_size=0.2, random_state=42)
-
-    X_train, y_train = prepare_X_y(df_train, feature_cols, num_cols, gen_cols, target_col="rating")
-    X_test, y_test = prepare_X_y(df_test, feature_cols, num_cols, gen_cols, target_col="rating")
-
-    print("Numeric features:", num_cols)
-    print("Number of genre features:", len(gen_cols))
-    print("X_train shape:", X_train.shape)
-    print("X_test shape :", X_test.shape)
-
-    
-    model = RandomForestRegressor(
-        n_estimators=10000,
-        max_depth=10,
-        max_features=0.2,      
-        min_samples_split=2,
-        min_samples_leaf=1,
-        random_state=42,
-        n_jobs=-1,
-        oob_score=False,
-        bootstrap=True,
-    )
-
-    model.fit(X_train, y_train)
-
-    y_pred_train = model.predict(X_train)
-    print(f"RMSE (TRAIN): {rmse(y_train, y_pred_train):.4f}")
-
-    y_pred_test = model.predict(X_test)
-    print(f"RMSE (TEST) : {rmse(y_test, y_pred_test):.4f}")
-
-    y_pred = model.predict(X_test)
-    print(f"MAE : {mae(y_test, y_pred):.4f}")
-    print(f"R2  : {r2_score(y_test, y_pred):.4f}")
-
-
-    valid_genres = [canonical_genre_key(c.replace("genre_", "")) for c in gen_cols]
-    valid_genres = sorted(set(valid_genres))
-
-    print("\n===== PREDICT ONE MOVIE =====")
-    print("Genres hợp lệ :")
-    print(", ".join(valid_genres), "\n")
-
-    while True:
-        s = input("budget (q để thoát): ").strip()
-        if s.lower() in ("q", "quit", "exit"):
-            break
-        try:
-            budget = float(s)
-        except ValueError:
-            print(" budget không hợp lệ\n")
-            continue
-
-        s = input("popularity: ").strip()
-        try:
-            popularity = float(s)
-        except ValueError:
-            print(" popularity không hợp lệ\n")
-            continue
-
-        s = input("release_year: ").strip()
-        try:
-            release_year = float(s)
-        except ValueError:
-            print(" release_year không hợp lệ\n")
-            continue
-
-        genres_in = input("genres (vd: Action,Drama hoặc sci-fi, science fiction): ").strip()
-        genres = [g.strip() for g in genres_in.split(",") if g.strip()]
-
-        X_one = build_one_movie_vector(
-            budget=budget,
-            popularity=popularity,
-            release_year=release_year,
-            genres_in=genres,
-            feature_cols=feature_cols,
-            numeric_cols=num_cols,
-            genre_cols=gen_cols,
-            genre_prefix="genre_",
-        )
-
-        pred = float(model.predict(X_one)[0])
-        pred_clamped = max(1.0, min(5.0, pred))
-        print(f" Predicted rating: {pred:.4f} \n")
+    run_export_pred_rf_for_stacking(data_filename=data_file, n_folds=k, seed=seed)
