@@ -1,49 +1,92 @@
 # Phạm Lê Anh Duy - 20162012
 
-import os
-import threading
+import sys
 import numpy as np
 import pandas as pd
 from pathlib import Path
-import tkinter as tk
-from tkinter import ttk, messagebox
 
-def find_data_csv(filename="data_raw.csv") -> Path:
+def find_data_csv(filename: str) -> Path:
+
+    p = Path(filename)
+    if p.exists():
+        return p.resolve()
+
     here = Path(__file__).resolve()
-
-    for p in [here.parent] + list(here.parents):
-        cand = p / "data" / filename
+    for parent in [here.parent] + list(here.parents):
+        cand = parent / "data" / filename
         if cand.exists():
-            return cand
-    raise FileNotFoundError(f"Không tìm thấy data/{filename} từ vị trí: {here}")
+            return cand.resolve()
 
-class Linear_Regression:
-    def __init__(self, learning_rate=0.01, n_iterations=10_000, use_standardize=True,
-                 early_stopping=False, tol=1e-4, patience=10):
+    raise FileNotFoundError(
+        f"Không tìm thấy file: '{filename}'.\n"
+        f"- Hãy đặt file vào thư mục 'data/' của project hoặc truyền đường dẫn đầy đủ.\n"
+        f"- Vị trí code hiện tại: {here}"
+    )
+
+
+class LinearRegressionGD:
+    def __init__(
+        self,
+        learning_rate=0.05,
+        n_iterations=10_000,
+        standardize=False,   
+        numeric_idx=None,
+        early_stopping=True,
+        tol=1e-8,
+        patience=200,
+        clip_grad=5.0,
+        random_state=42,
+    ):
         self.learning_rate = float(learning_rate)
         self.n_iterations = int(n_iterations)
-        self.use_standardize = bool(use_standardize)
+        self.standardize = bool(standardize)
+        self.numeric_idx = None if numeric_idx is None else np.array(numeric_idx, dtype=int)
 
-        self.early_stopping = early_stopping
-        self.tol = tol
-        self.patience = patience
+        self.early_stopping = bool(early_stopping)
+        self.tol = float(tol)
+        self.patience = int(patience)
+        self.clip_grad = float(clip_grad)
+
+        self.random_state = int(random_state)
 
         self.weights = None
-        self.bias = None
+        self.bias = 0.0
+
         self.x_mean_ = None
         self.x_std_ = None
+
         self.history_ = {"loss": [], "iterations": 0}
 
-    def _fit_scaler(self, X):
-        self.x_mean_ = np.mean(X, axis=0)
-        self.x_std_ = np.std(X, axis=0)
-        self.x_std_[self.x_std_ == 0] = 1.0
+    def _fit_scaler(self, X: np.ndarray):
+        if not self.standardize:
+            self.x_mean_, self.x_std_ = None, None
+            return
 
-    def _transform(self, X):
-        if not self.use_standardize:
+        if self.numeric_idx is None:
+            mean = X.mean(axis=0)
+            std = X.std(axis=0)
+            std[std == 0] = 1.0
+            self.x_mean_ = mean
+            self.x_std_ = std
+        else:
+            mean = np.zeros(X.shape[1], dtype=float)
+            std = np.ones(X.shape[1], dtype=float)
+
+            sub = X[:, self.numeric_idx]
+            m = sub.mean(axis=0)
+            s = sub.std(axis=0)
+            s[s == 0] = 1.0
+
+            mean[self.numeric_idx] = m
+            std[self.numeric_idx] = s
+            self.x_mean_ = mean
+            self.x_std_ = std
+
+    def _transform(self, X: np.ndarray) -> np.ndarray:
+        if not self.standardize:
             return X
         if self.x_mean_ is None or self.x_std_ is None:
-            raise ValueError("Scaler is not fitted. Call fit() first.")
+            raise ValueError("Scaler chưa fit. Hãy gọi fit() trước.")
         return (X - self.x_mean_) / self.x_std_
 
     def fit(self, X, y):
@@ -52,39 +95,40 @@ class Linear_Regression:
 
         n_samples, n_features = X.shape
 
-        if self.use_standardize:
-            self._fit_scaler(X)
-            X_train = self._transform(X)
-        else:
-            X_train = X
+        self._fit_scaler(X)
+        Xb = self._transform(X)
 
         self.weights = np.zeros(n_features, dtype=float)
         self.bias = 0.0
 
         self.history_ = {"loss": [], "iterations": 0}
         best_loss = float("inf")
-        patience_counter = 0
+        wait = 0
 
         for i in range(self.n_iterations):
-            y_pred = X_train @ self.weights + self.bias
-            error = y_pred - y
+            y_pred = Xb @ self.weights + self.bias
+            err = y_pred - y
+            loss = float(np.mean(err ** 2))
+            self.history_["loss"].append(loss)
 
-            current_loss = float(np.mean(error ** 2))
-            self.history_["loss"].append(current_loss)
+            dw = (2.0 / n_samples) * (Xb.T @ err)
+            db = (2.0 / n_samples) * float(np.sum(err))
 
-            dw = (2.0 / n_samples) * (X_train.T @ error)
-            db = (2.0 / n_samples) * np.sum(error)
+            if self.clip_grad is not None and self.clip_grad > 0:
+                gnorm = float(np.linalg.norm(dw))
+                if gnorm > self.clip_grad:
+                    dw = dw * (self.clip_grad / (gnorm + 1e-12))
 
             self.weights -= self.learning_rate * dw
             self.bias -= self.learning_rate * db
 
             if self.early_stopping:
-                if best_loss - current_loss > self.tol:
-                    best_loss = current_loss
-                    patience_counter = 0
+                if best_loss - loss > self.tol:
+                    best_loss = loss
+                    wait = 0
                 else:
-                    patience_counter += 1
-                    if patience_counter >= self.patience:
+                    wait += 1
+                    if wait >= self.patience:
                         self.history_["iterations"] = i + 1
                         break
         else:
@@ -94,282 +138,226 @@ class Linear_Regression:
 
     def predict(self, X):
         X = np.asarray(X, dtype=float)
-        Xp = self._transform(X) if self.use_standardize else X
-        return Xp @ self.weights + self.bias
+        Xb = self._transform(X)
+        return Xb @ self.weights + self.bias
 
-    def evaluate(self, X, y):
+    @staticmethod
+    def mse(y_true, y_pred):
+        y_true = np.asarray(y_true, dtype=float).reshape(-1)
+        y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+        return float(np.mean((y_true - y_pred) ** 2))
+
+    @staticmethod
+    def r2(y_true, y_pred):
+        y_true = np.asarray(y_true, dtype=float).reshape(-1)
+        y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+        ss_res = float(np.sum((y_true - y_pred) ** 2))
+        ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
+        return float(1.0 - ss_res / ss_tot) if ss_tot != 0 else 0.0
+
+    def cross_validate_oof(self, X, y, n_folds=5, shuffle=True, random_state=42, verbose=True):
+        X = np.asarray(X, dtype=float)
         y = np.asarray(y, dtype=float).reshape(-1)
-        y_pred = self.predict(X)
-        return float(np.mean((y - y_pred) ** 2))
+        n = X.shape[0]
 
-    def score(self, X, y):
-        y = np.asarray(y, dtype=float).reshape(-1)
-        y_pred = self.predict(X)
-        u = ((y - y_pred) ** 2).sum()
-        v = ((y - y.mean()) ** 2).sum()
-        return float(1.0 - u / v) if v != 0 else 0.0
+        idx = np.arange(n)
+        if shuffle:
+            rng = np.random.default_rng(random_state)
+            rng.shuffle(idx)
 
+        fold_sizes = np.full(n_folds, n // n_folds, dtype=int)
+        fold_sizes[: n % n_folds] += 1
 
-class App(tk.Tk):
-    def __init__(self, csv_path: str):
-        super().__init__()
-        self.title("Dự đoán rating phim - Linear Regression")
-        self.geometry("980x420")
-        self.resizable(False, False)
+        oof = np.zeros(n, dtype=float)
+        fold_r2, fold_mse = [], []
 
-        self.csv_path = str(csv_path)
+        cur = 0
+        for f in range(n_folds):
+            vs = cur
+            ve = cur + fold_sizes[f]
+            val_idx = idx[vs:ve]
+            tr_idx = np.concatenate([idx[:vs], idx[ve:]])
 
-        self.data = None
-        self.model = None
-        self.feature_cols = []
-        self.base_cols = []
-        self.genre_cols = []
-        self.feature_median = {}
+            X_tr, y_tr = X[tr_idx], y[tr_idx]
+            X_val, y_val = X[val_idx], y[val_idx]
 
-        self.genre_state = {}    
-        self.genre_buttons = {}   
-
-        self.status_var = tk.StringVar(value="Đang load dữ liệu & train model...")
-        self.pred_var = tk.StringVar(value="Rating dự đoán: --")
-
-        self._build_ui()
-        self._train_async()
-
-    def _build_ui(self):
-        pad = 12
-
-        top = ttk.Frame(self)
-        top.pack(fill="x", padx=pad, pady=(pad, 6))
-
-        ttk.Label(top, text="Nhập thong tin phim", font=("Segoe UI", 12, "bold")).pack(side="left")
-        ttk.Label(top, text="Chon the loai", font=("Segoe UI", 12, "bold")).pack(side="left", padx=(220, 0))
-        ttk.Label(self, textvariable=self.status_var).pack(anchor="w", padx=pad)
-
-        body = ttk.Frame(self)
-        body.pack(fill="both", expand=True, padx=pad, pady=(8, 8))
-
-        # Left panel
-        left = ttk.Frame(body)
-        left.pack(side="left", fill="y")
-
-        ttk.Label(left, text="Tên phim:").grid(row=0, column=0, sticky="w", pady=6)
-        self.name_entry = ttk.Entry(left, width=26)
-        self.name_entry.grid(row=0, column=1, sticky="w", pady=6)
-
-        ttk.Label(left, text="Budget:").grid(row=1, column=0, sticky="w", pady=6)
-        self.budget_entry = ttk.Entry(left, width=26)
-        self.budget_entry.grid(row=1, column=1, sticky="w", pady=6)
-
-        ttk.Label(left, text="Popularity:").grid(row=2, column=0, sticky="w", pady=6)
-        self.pop_entry = ttk.Entry(left, width=26)
-        self.pop_entry.grid(row=2, column=1, sticky="w", pady=6)
-
-        ttk.Label(left, text="Release year:").grid(row=3, column=0, sticky="w", pady=6)
-        self.year_entry = ttk.Entry(left, width=26)
-        self.year_entry.grid(row=3, column=1, sticky="w", pady=6)
-
-        self.predict_btn = ttk.Button(left, text="Dự đoán rating", command=self.on_predict, state="disabled")
-        self.predict_btn.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(12, 6))
-
-        self.clear_btn = ttk.Button(left, text="Clear", command=self.on_clear, state="disabled")
-        self.clear_btn.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(0, 10))
-
-        right = ttk.Frame(body)
-        right.pack(side="left", fill="both", expand=True, padx=(40, 0))
-
-        self.genre_grid = ttk.Frame(right)
-        self.genre_grid.pack(anchor="nw")
-
-        bottom = ttk.Frame(self)
-        bottom.pack(fill="x", padx=pad, pady=(0, pad))
-        ttk.Label(bottom, textvariable=self.pred_var, font=("Segoe UI", 12, "bold")).pack(anchor="w")
-
-    def _build_genre_buttons(self):
-
-        for w in self.genre_grid.winfo_children():
-            w.destroy()
-
-        self.genre_buttons.clear()
-        self.genre_state = {gc: 0 for gc in self.genre_cols}
-
-        cols = 4
-        btn_w = 14
-        btn_h = 2
-
-        for i, gc in enumerate(self.genre_cols):
-            r = i // cols
-            c = i % cols
-
-            display = gc.replace("genre_", "").replace("_", " ")
-            b = tk.Button(
-                self.genre_grid,
-                text=display,
-                width=btn_w,
-                height=btn_h,
-                relief="raised",
-                command=lambda g=gc: self._toggle_genre(g)
+            m = LinearRegressionGD(
+                learning_rate=self.learning_rate,
+                n_iterations=self.n_iterations,
+                standardize=self.standardize,
+                numeric_idx=self.numeric_idx,
+                early_stopping=self.early_stopping,
+                tol=self.tol,
+                patience=self.patience,
+                clip_grad=self.clip_grad,
+                random_state=self.random_state,
             )
-            b.grid(row=r, column=c, padx=8, pady=6, sticky="w")
+            m.fit(X_tr, y_tr)
+            pred = m.predict(X_val)
 
-            self.genre_buttons[gc] = b
+            oof[val_idx] = pred
+            fold_r2.append(self.r2(y_val, pred))
+            fold_mse.append(self.mse(y_val, pred))
 
-    def _toggle_genre(self, genre_col: str):
-        cur = self.genre_state.get(genre_col, 0)
-        new = 0 if cur == 1 else 1
-        self.genre_state[genre_col] = new
+            cur = ve
 
-        b = self.genre_buttons[genre_col]
-        b.config(relief="sunken" if new == 1 else "raised")
+        if verbose:
+            for i, (r2v, msev) in enumerate(zip(fold_r2, fold_mse), start=1):
+                print(f"Fold {i}: R² = {r2v:.4f} | MSE = {msev:.4f}")
+            print("=" * 50)
+            print(f"Mean R²: {float(np.mean(fold_r2)):.4f} (+/- {float(np.std(fold_r2)):.4f})")
+            print("=" * 50)
+            print(f"OOF MSE: {self.mse(y, oof):.4f}")
+            print(f"OOF R²:  {self.r2(y, oof):.4f}")
 
-    def _train_async(self):
-        t = threading.Thread(target=self._train_model, daemon=True)
-        t.start()
+        return oof, fold_r2, fold_mse
 
-    def _train_model(self):
-        try:
-            df = pd.read_csv(self.csv_path)
 
-            drop_ids = {"userId", "movieId"}  
-            target = "rating"
-            feature_cols = [c for c in df.columns if c != target and c not in drop_ids]
+def split_60_20_20(n, seed=42):
+    rng = np.random.default_rng(seed)
+    idx = np.arange(n)
+    rng.shuffle(idx)
+    n_train = int(0.60 * n)
+    n_val = int(0.20 * n)
+    train_idx = idx[:n_train]
+    val_idx = idx[n_train:n_train + n_val]
+    test_idx = idx[n_train + n_val:]
+    return train_idx, val_idx, test_idx
 
-            df[feature_cols] = df[feature_cols].apply(pd.to_numeric, errors="coerce")
-            df[target] = pd.to_numeric(df[target], errors="coerce")
-            df.replace([np.inf, -np.inf], np.nan, inplace=True)
-            df = df.dropna(subset=[target]).copy()
-            df[feature_cols] = df[feature_cols].fillna(df[feature_cols].median(numeric_only=True))
 
-            X = df[feature_cols].to_numpy(dtype=float)
-            y = df[target].to_numpy(dtype=float)
+def export_pred_csv(path: Path, original_idx, y_pred, y_true, pred_col_name="pred_lr"):
+    out = pd.DataFrame(
+        {
+            "original_row_index": original_idx.astype(int),
+            pred_col_name: np.asarray(y_pred, dtype=float),
+            "rating_true": np.asarray(y_true, dtype=float),
+        }
+    ).sort_values("original_row_index", kind="mergesort")
+    out.to_csv(path, index=False)
+    print(f"\nSaved: {path}")
+    print(out.head(10).to_string(index=False))
 
-            model = Linear_Regression(
-                learning_rate=0.1,
-                n_iterations=10000,
-                use_standardize=True,
-                early_stopping=True,
-                tol=1e-8,
-                patience=200
-            )
-            model.fit(X, y)
+def load_selected_features(csv_path: Path):
+    df = pd.read_csv(csv_path)
 
-            self.data = df
-            self.model = model
-            self.feature_cols = feature_cols
-            self.genre_cols = [c for c in feature_cols if c.startswith("genre_")]
-            self.base_cols = [c for c in feature_cols if not c.startswith("genre_")]
-            self.feature_median = df[feature_cols].median(numeric_only=True).to_dict()
+    target = "rating"
+    required_numeric = ["budget", "popularity", "release_year"]
+    genre_cols = sorted([c for c in df.columns if c.startswith("genre_")])
 
-            self.after(0, self._on_train_done)
+    feature_cols = required_numeric + genre_cols
 
-        except Exception as e:
-            self.after(0, self._on_train_fail, e)
+    missing = [c for c in required_numeric + [target] if c not in df.columns]
+    if missing:
+        raise ValueError(f"Thiếu cột bắt buộc: {missing}\nHiện có: {list(df.columns)[:40]} ...")
 
-    def _on_train_done(self):
+    for c in feature_cols + [target]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
 
-        if "budget" in self.base_cols:
-            self.budget_entry.insert(0, str(self.feature_median.get("budget", 0)))
-        else:
-            self.budget_entry.insert(0, "0")
-            self.budget_entry.configure(state="disabled")
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df = df.dropna(subset=[target]).copy()
 
-        if "popularity" in self.base_cols:
-            self.pop_entry.insert(0, str(self.feature_median.get("popularity", 0)))
-        else:
-            self.pop_entry.insert(0, "0")
-            self.pop_entry.configure(state="disabled")
+    for c in required_numeric:
+        df[c] = df[c].fillna(df[c].median())
+    for c in genre_cols:
+        df[c] = df[c].fillna(0.0)
 
-        if "release_year" in self.base_cols:
-            self.year_entry.insert(0, str(int(self.feature_median.get("release_year", 2000))))
-        else:
-            self.year_entry.insert(0, "2000")
-            self.year_entry.configure(state="disabled")
+    X = df[feature_cols].to_numpy(dtype=float)
+    y = df[target].to_numpy(dtype=float)
 
-        self._build_genre_buttons()
+    return df, X, y, feature_cols
 
-        mse = self.model.evaluate(self.data[self.feature_cols].to_numpy(float), self.data["rating"].to_numpy(float))
-        r2 = self.model.score(self.data[self.feature_cols].to_numpy(float), self.data["rating"].to_numpy(float))
-        iters = self.model.history_.get("iterations", 0)
 
-        self.status_var.set(f"samples={len(self.data)} | features={len(self.feature_cols)} | iters={iters} | MSE={mse:.4f} | R²={r2:.4f}")
-        self.predict_btn.configure(state="normal")
-        self.clear_btn.configure(state="normal")
+def run_export_pred_lr_for_stacking(data_filename="data_KNN_new.csv", n_folds=5, seed=42):
+    csv_path = find_data_csv(data_filename)
+    df, X, y, feature_cols = load_selected_features(csv_path)
 
-    def _on_train_fail(self, e: Exception):
-        self.status_var.set("Train thất bại.")
-        messagebox.showerror("Error", f"Không train được model:\n{e}")
+    print(f"Loaded: {csv_path}")
+    print(f"Samples: {len(df)} | Features: {len(feature_cols)}")
+    print("First cols:", feature_cols[:10], "..." if len(feature_cols) > 10 else "")
 
-    def _read_float(self, entry: ttk.Entry, col: str):
-        s = entry.get().strip()
-        if s == "":
-            return float(self.feature_median.get(col, 0))
-        try:
-            return float(s)
-        except ValueError:
-            raise ValueError(f"Giá trị '{col}' không hợp lệ: {s}")
+    train_idx, val_idx, test_idx = split_60_20_20(len(X), seed=seed)
 
-    def _read_int(self, entry: ttk.Entry, col: str):
-        s = entry.get().strip()
-        if s == "":
-            return int(self.feature_median.get(col, 2000))
-        try:
-            return int(float(s))
-        except ValueError:
-            raise ValueError(f"Giá trị '{col}' không hợp lệ: {s}")
+    X_train, y_train = X[train_idx], y[train_idx]
+    X_val, y_val = X[val_idx], y[val_idx]
+    X_test, y_test = X[test_idx], y[test_idx]
 
-    def on_predict(self):
-        if self.model is None:
-            return
-        try:
-            row = {}
+    model = LinearRegressionGD(
+        learning_rate=0.05,
+        n_iterations=10000,
+        standardize=False,
+        early_stopping=True,
+        tol=1e-8,
+        patience=200,
+        clip_grad=5.0,
+        random_state=seed,
+    )
 
-            # base cols
-            for c in self.base_cols:
-                if c == "budget":
-                    row[c] = self._read_float(self.budget_entry, "budget")
-                elif c == "popularity":
-                    row[c] = self._read_float(self.pop_entry, "popularity")
-                elif c == "release_year":
-                    row[c] = self._read_int(self.year_entry, "release_year")
-                else:
-                    row[c] = float(self.feature_median.get(c, 0))
+    oof_train, _, _ = model.cross_validate_oof(
+        X_train, y_train, n_folds=n_folds, shuffle=True, random_state=seed, verbose=True
+    )
 
-            for gc in self.genre_cols:
-                row[gc] = int(self.genre_state.get(gc, 0))
+    model.fit(X_train, y_train)
+    pred_train = model.predict(X_train)
+    pred_val = model.predict(X_val)
+    pred_test = model.predict(X_test)
 
-            x_input = np.array([[row[c] for c in self.feature_cols]], dtype=float)
+    train_mse = LinearRegressionGD.mse(y_train, pred_train)
+    val_mse = LinearRegressionGD.mse(y_val, pred_val)
+    test_mse = LinearRegressionGD.mse(y_test, pred_test)
 
-            pred = float(self.model.predict(x_input)[0])
-            pred_clip = float(np.clip(pred, 0.5, 5.0))
+    train_r2 = LinearRegressionGD.r2(y_train, pred_train)
+    val_r2 = LinearRegressionGD.r2(y_val, pred_val)
+    test_r2 = LinearRegressionGD.r2(y_test, pred_test)
 
-            self.pred_var.set(f"Rating dự đoán: {pred_clip:.4f}")
+    print(f"Train samples: {len(y_train)} | Val: {len(y_val)} | Test: {len(y_test)}")
+    print(f"Train MSE={train_mse:.4f} | R²={train_r2:.4f}")
+    print(f"Val   MSE={val_mse:.4f} | R²={val_r2:.4f}")
+    print(f"Test  MSE={test_mse:.4f} | R²={test_r2:.4f}")
+    print(f"Used iterations: {model.history_['iterations']}")
 
-        except Exception as e:
-            messagebox.showwarning("Input error", str(e))
+    print(f"{'i':<4} {'y_true':>8} {'y_pred':>10} {'abs_err':>10}")
+    print("-" * 36)
+    for i in range(min(10, len(y_test))):
+        ae = abs(y_test[i] - pred_test[i])
+        print(f"{i:<4} {y_test[i]:>8.2f} {pred_test[i]:>10.2f} {ae:>10.2f}")
+    print("-" * 36)
 
-    def on_clear(self):
-        self.name_entry.delete(0, "end")
+    # export
+    out_dir = csv_path.parent
+    export_pred_csv(out_dir / "oof_lr_train.csv", train_idx, oof_train, y_train, pred_col_name="oof_pred_lr")
+    export_pred_csv(out_dir / "val_lr.csv", val_idx, pred_val, y_val, pred_col_name="pred_lr")
+    export_pred_csv(out_dir / "test_lr.csv", test_idx, pred_test, y_test, pred_col_name="pred_lr")
 
-        if self.budget_entry.cget("state") != "disabled":
-            self.budget_entry.delete(0, "end")
-            self.budget_entry.insert(0, str(self.feature_median.get("budget", 0)))
-
-        if self.pop_entry.cget("state") != "disabled":
-            self.pop_entry.delete(0, "end")
-            self.pop_entry.insert(0, str(self.feature_median.get("popularity", 0)))
-
-        if self.year_entry.cget("state") != "disabled":
-            self.year_entry.delete(0, "end")
-            self.year_entry.insert(0, str(int(self.feature_median.get("release_year", 2000))))
-
-        for gc in self.genre_cols:
-            self.genre_state[gc] = 0
-            self.genre_buttons[gc].config(relief="raised")
-
-        self.pred_var.set("Rating dự đoán: --")
+    out_npz = out_dir / "pred_lr_60_20_20.npz"
+    np.savez(
+        out_npz,
+        oof_train=oof_train,
+        pred_train=pred_train,
+        pred_val=pred_val,
+        pred_test=pred_test,
+        y_train=y_train,
+        y_val=y_val,
+        y_test=y_test,
+        train_idx=train_idx,
+        val_idx=val_idx,
+        test_idx=test_idx,
+        feature_cols=np.array(feature_cols, dtype=object),
+    )
+    print(f"\nSaved NPZ: {out_npz}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
-    csv_path = find_data_csv("data_raw.csv")
+    data_file = "data_KNN_new.csv"
+    k = 5
+    seed = 42
 
-    app = App(csv_path)
-    app.mainloop()
+    args = sys.argv[1:]
+    if "--data" in args:
+        data_file = args[args.index("--data") + 1]
+    if "--k" in args:
+        k = int(args[args.index("--k") + 1])
+    if "--seed" in args:
+        seed = int(args[args.index("--seed") + 1])
+
+    run_export_pred_lr_for_stacking(data_filename=data_file, n_folds=k, seed=seed)
