@@ -12,8 +12,6 @@ NUM_COLS = ["budget", "popularity", "release_year"]
 TARGET_COL = "rating"
 EPS = 1e-9
 
-
-# -------------------- data utils (standard library only) --------------------
 def clean_col(name: str) -> str:
     return (name or "").lstrip("\ufeff").strip()
 
@@ -44,7 +42,7 @@ def mean_std(vals):
     if n == 0:
         return 0.0, 1.0
     mu = sum(vals) / n
-    var = sum((v - mu) ** 2 for v in vals) / n  # ddof=0
+    var = sum((v - mu) ** 2 for v in vals) / n  
     sd = math.sqrt(var)
     if sd == 0:
         sd = 1.0
@@ -82,7 +80,7 @@ def get_feature_cols_from_knn(knn_path):
 
 
 def compute_scaler_from_raw(raw_path):
-    # Tính median fill + mean/std sau khi impute, cho 3 cột numeric
+
     with open(raw_path, "r", newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
         header = next(reader)
@@ -114,20 +112,19 @@ def compute_scaler_from_raw(raw_path):
     for c in NUM_COLS:
         imputed = [(r[c] if r[c] is not None else fills[c]) for r in rows_num]
         mu, sd = mean_std(imputed)
-        scaler[c] = (mu, sd, fills[c])  # mean, std, fill
+        scaler[c] = (mu, sd, fills[c]) 
     return scaler
 
 
 def knn_predict_from_knn_csv(knn_path, feature_cols, target_col, xq, k=5, weighted=True):
-    # streaming top-k
-    heap = []  # max-heap by dist2: store (-dist2, y)
+
+    heap = []  
 
     with open(knn_path, "r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames is None:
             raise ValueError("data_KNN.csv không có header")
 
-        # map original keys -> clean keys
         orig_fields = list(reader.fieldnames)
         clean_fields = [clean_col(h) for h in orig_fields]
         clean_to_orig = {}
@@ -199,8 +196,6 @@ def build_query_vector_from_raw_inputs(feature_cols, genre_cols, scaler, budget,
             vec.append(0.0)
     return vec
 
-
-# -------------------- Tkinter UI --------------------
 class ScrollableFrame(ttk.Frame):
     def __init__(self, container, *args, **kwargs):
         super().__init__(container, *args, **kwargs)
@@ -241,24 +236,22 @@ class KNNApp(tk.Tk):
             self.destroy()
             return
 
-        self.selected = set()  # set of genre column names (e.g. "genre_Action")
-        self.genre_buttons = {}  # col -> Button
+        self.selected = set() 
+        self.genre_buttons = {} 
 
         self._build_ui()
 
     def _build_ui(self):
-        # Left: inputs
+
         left = ttk.Frame(self, padding=12)
         left.pack(side="left", fill="y")
 
         ttk.Label(left, text="Nhập thông tin phim", font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 10))
 
-        # movie name (not used)
         ttk.Label(left, text="Tên phim:").pack(anchor="w")
         self.movie_name = ttk.Entry(left, width=35)
         self.movie_name.pack(anchor="w", pady=(0, 10))
 
-        # numeric inputs
         self.budget_var = tk.StringVar()
         self.pop_var = tk.StringVar()
         self.year_var = tk.StringVar()
@@ -272,7 +265,6 @@ class KNNApp(tk.Tk):
         ttk.Label(left, text="Release year:").pack(anchor="w")
         ttk.Entry(left, textvariable=self.year_var, width=35).pack(anchor="w", pady=(0, 10))
 
-        # K + weighted
         self.k_var = tk.StringVar(value="5")
         self.weighted_var = tk.BooleanVar(value=True)
 
@@ -289,7 +281,6 @@ class KNNApp(tk.Tk):
         self.result_lbl = ttk.Label(left, text="Rating dự đoán: -", font=("Segoe UI", 13, "bold"))
         self.result_lbl.pack(anchor="w", pady=(14, 0))
 
-        # Right: genre cards
         right = ttk.Frame(self, padding=12)
         right.pack(side="right", fill="both", expand=True)
 
@@ -299,7 +290,7 @@ class KNNApp(tk.Tk):
         sf = ScrollableFrame(right)
         sf.pack(fill="both", expand=True)
 
-        # build “cards” as toggle buttons in a grid
+
         cols_per_row = 4
         for idx, gc in enumerate(sorted(self.genre_cols)):
             name = gc[len("genre_"):] if gc.lower().startswith("genre_") else gc
@@ -329,19 +320,18 @@ class KNNApp(tk.Tk):
             self._set_button_state(self.genre_buttons[genre_col], selected=True)
 
     def _set_button_state(self, btn: tk.Button, selected: bool):
-        # simple “card selected” effect
+
         if selected:
             btn.config(relief="sunken")
         else:
             btn.config(relief="raised")
 
     def on_predict(self):
-        # parse inputs
+
         budget = to_float(self.budget_var.get())
         popularity = to_float(self.pop_var.get())
         year = to_float(self.year_var.get())
 
-        # allow blank -> use median fill (like your preprocessing)
         try:
             k = int(self.k_var.get().strip() or "5")
             if k <= 0:
