@@ -192,10 +192,10 @@ if __name__ == "__main__":
     
     model = RandomForestRegressor(
         n_estimators=10000,
-        max_depth=None,
+        max_depth=10,
         max_features=0.2,      
         min_samples_split=2,
-        min_samples_leaf=2,
+        min_samples_leaf=1,
         random_state=42,
         n_jobs=-1,
         oob_score=False,
