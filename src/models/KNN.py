@@ -8,7 +8,9 @@ import heapq
 # CONFIG
 # =========================
 DATA_PATH = os.path.join("data", "data_KNN_new.csv")
-OOF_OUT_PATH = os.path.join("data", "oof_knn_train_full.csv")
+
+OOF_TRAIN_OUT_PATH = os.path.join("data", "oof_knn_train_full.csv")
+TEST_OUT_PATH = os.path.join("data", "oof_knn_test_full.csv")
 
 SEED = 42
 FOLDS = 5
@@ -20,7 +22,7 @@ TEST_RATIO = 0.20
 NUM_COLS = ["budget", "popularity", "release_year"]
 TARGET_COL = "rating"
 
-K_FIXED = 50   
+K_FIXED = 50  # <<< bạn tự chỉnh K ở đây
 
 
 # =========================
@@ -67,6 +69,8 @@ def r2_score(y_true, y_pred):
 
 # =========================
 # Load CSV -> (b, pop, year, mask, rating)
+#   - genre_* -> bitmask
+#   - rating KHÔNG dùng làm feature
 # =========================
 def load_knn_bitmask_csv(path):
     if not os.path.exists(path):
@@ -108,6 +112,7 @@ def load_knn_bitmask_csv(path):
             if b is None or p is None or yr is None or rt is None:
                 continue
 
+            # build bitmask from genre_*
             m = 0
             for bit, gi in enumerate(genre_indices):
                 if gi < len(row):
@@ -245,13 +250,24 @@ def compute_oof_knn(b_tr, p_tr, y_tr, m_tr, r_tr, k=5, folds=5, seed=42):
     return oof
 
 
-def export_oof(oof_pred, y_train, orig_train_idx, out_path):
+# =========================
+# Export helpers
+# =========================
+def export_train_oof(oof_pred, y_train, orig_train_idx, out_path):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["original_row_index", "oof_pred", "rating_true"])
         for i in range(len(oof_pred)):
             w.writerow([orig_train_idx[i], oof_pred[i], y_train[i]])
+
+def export_test_pred_only(pred, orig_test_idx, out_path):
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["original_row_index", "pred_test"])
+        for i in range(len(pred)):
+            w.writerow([orig_test_idx[i], pred[i]])
 
 
 # =========================
@@ -272,19 +288,19 @@ def main():
 
     print(f"Train: {len(r_tr)} | Val: {len(r_va)} | Test: {len(r_te)}\n")
 
-    # ----- Export OOF for TRAIN -----
+    # ----- OOF TRAIN -----
     print("=== Tạo & xuất OOF predictions (TRAIN, fold=5) ===")
     oof = compute_oof_knn(b_tr, p_tr, y_tr, m_tr, r_tr, k=K_FIXED, folds=FOLDS, seed=SEED)
-    export_oof(oof, r_tr, id_tr, OOF_OUT_PATH)
-    print(f"Đã xuất: {OOF_OUT_PATH}")
+    export_train_oof(oof, r_tr, id_tr, OOF_TRAIN_OUT_PATH)
+    print(f"Đã xuất: {OOF_TRAIN_OUT_PATH}")
     print(f"OOF Train RMSE={rmse(r_tr, oof):.4f} | MAE={mae(r_tr, oof):.4f} | R2={r2_score(r_tr, oof):.4f}\n")
 
-    # ----- Validate (train=TRAIN, eval=VAL) -----
+    # ----- VALIDATION -----
     print("=== Đánh giá trên VALIDATION (train=TRAIN) ===")
     pred_val = knn_predict_batch(b_tr, p_tr, y_tr, m_tr, r_tr, b_va, p_va, y_va, m_va, K_FIXED)
     print(f"Val RMSE={rmse(r_va, pred_val):.4f} | Val MAE={mae(r_va, pred_val):.4f} | Val R2={r2_score(r_va, pred_val):.4f}\n")
 
-    # ----- Final test (train=TRAIN+VAL, eval=TEST) -----
+    # ----- TEST (train=TRAIN+VAL) -----
     print("=== Đánh giá cuối trên TEST (train=TRAIN+VAL) ===")
     b_final = b_tr + b_va
     p_final = p_tr + p_va
@@ -294,6 +310,10 @@ def main():
 
     pred_test = knn_predict_batch(b_final, p_final, y_final, m_final, r_final, b_te, p_te, y_te, m_te, K_FIXED)
     print(f"Test RMSE={rmse(r_te, pred_test):.4f} | Test MAE={mae(r_te, pred_test):.4f} | Test R2={r2_score(r_te, pred_test):.4f}")
+
+    # export test predictions WITHOUT rating_true
+    export_test_pred_only(pred_test, id_te, TEST_OUT_PATH)
+    print(f"Đã xuất: {TEST_OUT_PATH}")
 
 
 if __name__ == "__main__":
