@@ -5,16 +5,8 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-
-# =========================
-# Utils: find data file
-# =========================
 def find_data_csv(filename: str) -> Path:
-    """
-    Ưu tiên:
-    1) Nếu filename là path tồn tại -> dùng luôn
-    2) Nếu không, tìm theo cấu trúc project: <root>/data/<filename>
-    """
+
     p = Path(filename)
     if p.exists():
         return p.resolve()
@@ -32,15 +24,12 @@ def find_data_csv(filename: str) -> Path:
     )
 
 
-# =========================
-# Linear Regression (GD)
-# =========================
 class LinearRegressionGD:
     def __init__(
         self,
         learning_rate=0.05,
         n_iterations=10_000,
-        standardize=False,   # file bạn nói đã z-score -> để False
+        standardize=False,   
         numeric_idx=None,
         early_stopping=True,
         tol=1e-8,
