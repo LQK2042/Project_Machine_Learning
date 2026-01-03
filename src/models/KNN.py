@@ -1,320 +1,368 @@
-import csv
+
+import sys
 import os
-import math
-import random
 import heapq
-
-# =========================
-# CONFIG
-# =========================
-DATA_PATH = os.path.join("data", "data_KNN_new.csv")
-
-OOF_TRAIN_OUT_PATH = os.path.join("data", "oof_knn_train_full.csv")
-TEST_OUT_PATH = os.path.join("data", "oof_knn_test_full.csv")
-
-SEED = 42
-FOLDS = 5
-
-TRAIN_RATIO = 0.60
-VAL_RATIO = 0.20
-TEST_RATIO = 0.20
-
-NUM_COLS = ["budget", "popularity", "release_year"]
-TARGET_COL = "rating"
-
-K_FIXED = 50  # <<< bạn tự chỉnh K ở đây
+import numpy as np
+import pandas as pd
+from pathlib import Path
 
 
 # =========================
-# Utilities
+# Utils: find file like LR
 # =========================
-def clean_col(name: str) -> str:
-    return (name or "").lstrip("\ufeff").strip()
+def find_data_csv(filename: str) -> Path:
+    p = Path(filename)
+    if p.exists():
+        return p.resolve()
 
-def to_float(x):
-    if x is None:
-        return None
-    s = str(x).strip()
-    if s == "" or s.lower() in {"na", "nan", "null", "none"}:
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
+    here = Path(__file__).resolve()
+    for parent in [here.parent] + list(here.parents):
+        cand = parent / "data" / filename
+        if cand.exists():
+            return cand.resolve()
 
-def rmse(y_true, y_pred):
-    n = len(y_true)
-    if n == 0:
-        return 0.0
-    mse = sum((y_true[i] - y_pred[i]) ** 2 for i in range(n)) / n
-    return math.sqrt(mse)
-
-def mae(y_true, y_pred):
-    n = len(y_true)
-    if n == 0:
-        return 0.0
-    return sum(abs(y_true[i] - y_pred[i]) for i in range(n)) / n
-
-def r2_score(y_true, y_pred):
-    n = len(y_true)
-    if n == 0:
-        return 0.0
-    y_mean = sum(y_true) / n
-    ss_tot = sum((y - y_mean) ** 2 for y in y_true)
-    ss_res = sum((y_true[i] - y_pred[i]) ** 2 for i in range(n))
-    if ss_tot == 0:
-        return 0.0
-    return 1.0 - (ss_res / ss_tot)
+    raise FileNotFoundError(
+        f"Không tìm thấy file: '{filename}'.\n"
+        f"- Hãy đặt file vào thư mục 'data/' của project hoặc truyền đường dẫn đầy đủ.\n"
+        f"- Vị trí code hiện tại: {here}"
+    )
 
 
 # =========================
-# Load CSV -> (b, pop, year, mask, rating)
-#   - genre_* -> bitmask
-#   - rating KHÔNG dùng làm feature
+# Metrics (tương tự)
 # =========================
-def load_knn_bitmask_csv(path):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Không tìm thấy file: {path}")
+def mse(y_true, y_pred):
+    y_true = np.asarray(y_true, dtype=float).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+    return float(np.mean((y_true - y_pred) ** 2))
 
-    with open(path, "r", newline="", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        header_raw = next(reader)
-
-        header = [clean_col(h) for h in header_raw]
-        idx_map = {h.lower(): i for i, h in enumerate(header)}
-
-        if TARGET_COL not in idx_map:
-            raise ValueError(f"Không có cột '{TARGET_COL}' trong {path}. Header: {header}")
-
-        for c in NUM_COLS:
-            if c not in idx_map:
-                raise ValueError(f"Thiếu cột '{c}' trong {path}. Header: {header}")
-
-        b_i = idx_map["budget"]
-        p_i = idx_map["popularity"]
-        y_i = idx_map["release_year"]
-        r_i = idx_map[TARGET_COL]
-
-        genre_cols = [h for h in header if h.lower().startswith("genre_")]
-        genre_indices = [idx_map[h.lower()] for h in genre_cols]
-
-        budgets, pops, years, masks, ratings, orig_idx = [], [], [], [], [], []
-        row_counter = -1
-
-        for row in reader:
-            row_counter += 1
-
-            b = to_float(row[b_i]) if b_i < len(row) else None
-            p = to_float(row[p_i]) if p_i < len(row) else None
-            yr = to_float(row[y_i]) if y_i < len(row) else None
-            rt = to_float(row[r_i]) if r_i < len(row) else None
-
-            if b is None or p is None or yr is None or rt is None:
-                continue
-
-            # build bitmask from genre_*
-            m = 0
-            for bit, gi in enumerate(genre_indices):
-                if gi < len(row):
-                    gv = to_float(row[gi])
-                    if gv is not None and gv >= 0.5:
-                        m |= (1 << bit)
-
-            budgets.append(b)
-            pops.append(p)
-            years.append(yr)
-            masks.append(m)
-            ratings.append(rt)
-            orig_idx.append(row_counter)
-
-    if not budgets:
-        raise ValueError("Không load được dữ liệu hợp lệ (có thể dữ liệu lỗi/NaN).")
-
-    return budgets, pops, years, masks, ratings, orig_idx, genre_cols
+def r2(y_true, y_pred):
+    y_true = np.asarray(y_true, dtype=float).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+    ss_res = float(np.sum((y_true - y_pred) ** 2))
+    ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
+    return float(1.0 - ss_res / ss_tot) if ss_tot != 0 else 0.0
 
 
 # =========================
-# Split 60/20/20
+# Split 60/20/20 (giống LR)
 # =========================
-def split_60_20_20(budgets, pops, years, masks, ratings, orig_idx, seed=42):
-    n = len(ratings)
-    idx = list(range(n))
-    rng = random.Random(seed)
+def split_60_20_20(n, seed=42):
+    rng = np.random.default_rng(seed)
+    idx = np.arange(n)
     rng.shuffle(idx)
-
-    n_train = int(TRAIN_RATIO * n)
-    n_val = int(VAL_RATIO * n)
-
+    n_train = int(0.60 * n)
+    n_val = int(0.20 * n)
     train_idx = idx[:n_train]
     val_idx = idx[n_train:n_train + n_val]
     test_idx = idx[n_train + n_val:]
-
-    def take(idxs):
-        return (
-            [budgets[i] for i in idxs],
-            [pops[i] for i in idxs],
-            [years[i] for i in idxs],
-            [masks[i] for i in idxs],
-            [ratings[i] for i in idxs],
-            [orig_idx[i] for i in idxs],
-        )
-
-    return take(train_idx), take(val_idx), take(test_idx)
+    return train_idx, val_idx, test_idx
 
 
 # =========================
-# Distance with bitmask
-# dist2 = (db^2 + dp^2 + dy^2) + popcount(mask XOR qmask)
+# Export CSV (KHÔNG làm tròn)
 # =========================
-def dist2_bitmask(tb, tp, ty, tm, qb, qp, qy, qm):
-    db = tb - qb
-    dp = tp - qp
-    dy = ty - qy
-    genre_dist = (tm ^ qm).bit_count()
-    return db * db + dp * dp + dy * dy + genre_dist
+def export_pred_csv(path: Path, original_idx, y_pred, y_true, pred_col_name="pred_knn"):
+    out = pd.DataFrame(
+        {
+            "original_row_index": np.asarray(original_idx, dtype=int),
+            pred_col_name: np.asarray(y_pred, dtype=float),
+            "rating_true": np.asarray(y_true, dtype=float),
+        }
+    ).sort_values("original_row_index", kind="mergesort")
 
+    # CÁCH 1: KHÔNG float_format => giữ full precision
+    out.to_csv(path, index=False)
 
-# =========================
-# KNN prediction (UNWEIGHTED)
-# =========================
-def knn_predict_one(b_tr, p_tr, y_tr, m_tr, r_tr, qb, qp, qy, qm, k):
-    heap = []
-    sum_y = 0.0
-
-    hpush = heapq.heappush
-    hreplace = heapq.heapreplace
-
-    for i in range(len(r_tr)):
-        d2 = dist2_bitmask(b_tr[i], p_tr[i], y_tr[i], m_tr[i], qb, qp, qy, qm)
-
-        if len(heap) < k:
-            hpush(heap, (-d2, r_tr[i]))
-            sum_y += r_tr[i]
-        else:
-            worst_d2 = -heap[0][0]
-            if d2 < worst_d2:
-                popped = hreplace(heap, (-d2, r_tr[i]))
-                sum_y += r_tr[i] - popped[1]
-
-    return sum_y / len(heap)
-
-def knn_predict_batch(b_tr, p_tr, y_tr, m_tr, r_tr, b_q, p_q, y_q, m_q, k):
-    return [
-        knn_predict_one(b_tr, p_tr, y_tr, m_tr, r_tr, b_q[i], p_q[i], y_q[i], m_q[i], k)
-        for i in range(len(b_q))
-    ]
+    print(f"\nSaved: {path}")
+    print(out.head(10).to_string(index=False))
 
 
 # =========================
-# K-fold indices (on TRAIN)
+# Load + clean giống LR/RF
 # =========================
-def kfold_indices(n, folds=5, seed=42):
-    idx = list(range(n))
-    rng = random.Random(seed)
-    rng.shuffle(idx)
+def load_selected_features_for_knn(csv_path: Path):
+    df = pd.read_csv(csv_path, encoding="utf-8-sig")
 
-    fold_sizes = [n // folds] * folds
-    for i in range(n % folds):
-        fold_sizes[i] += 1
+    target = "rating"
+    required_numeric = ["budget", "popularity", "release_year"]
+    genre_cols = sorted([c for c in df.columns if c.startswith("genre_")])
+    feature_cols = required_numeric + genre_cols
 
-    folds_idx = []
-    start = 0
-    for fs in fold_sizes:
-        folds_idx.append(idx[start:start + fs])
-        start += fs
-    return folds_idx
+    missing = [c for c in required_numeric + [target] if c not in df.columns]
+    if missing:
+        raise ValueError(f"Thiếu cột bắt buộc: {missing}\nHiện có: {list(df.columns)[:40]} ...")
 
+    for c in feature_cols + [target]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
 
-# =========================
-# Compute OOF predictions for TRAIN (fold=5)
-# =========================
-def compute_oof_knn(b_tr, p_tr, y_tr, m_tr, r_tr, k=5, folds=5, seed=42):
-    n = len(r_tr)
-    oof = [None] * n
-    folds_idx = kfold_indices(n, folds=folds, seed=seed)
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df = df.dropna(subset=[target]).copy()
 
-    for i in range(folds):
-        val_ids = folds_idx[i]
-        val_set = set(val_ids)
-        tr_ids = [j for j in range(n) if j not in val_set]
+    for c in required_numeric:
+        df[c] = df[c].fillna(df[c].median())
+    for c in genre_cols:
+        df[c] = df[c].fillna(0.0)
 
-        bF = [b_tr[j] for j in tr_ids]
-        pF = [p_tr[j] for j in tr_ids]
-        yF = [y_tr[j] for j in tr_ids]
-        mF = [m_tr[j] for j in tr_ids]
-        rF = [r_tr[j] for j in tr_ids]
+    budgets = df["budget"].to_numpy(dtype=float)
+    pops    = df["popularity"].to_numpy(dtype=float)
+    years   = df["release_year"].to_numpy(dtype=float)
+    y       = df[target].to_numpy(dtype=float)
 
-        for j in val_ids:
-            oof[j] = knn_predict_one(bF, pF, yF, mF, rF, b_tr[j], p_tr[j], y_tr[j], m_tr[j], k)
+    # genre -> bitmask python int (để dùng .bit_count())
+    if genre_cols:
+        G = (df[genre_cols].to_numpy(dtype=float) >= 0.5).astype(np.int64)
+        powers = (1 << np.arange(len(genre_cols), dtype=np.int64))
+        masks_np = (G * powers).sum(axis=1).astype(np.int64)
+        masks = [int(x) for x in masks_np]  # ép sang python int
+    else:
+        masks = [0] * len(df)
 
-    return oof
+    return df, budgets, pops, years, masks, y, feature_cols
 
 
 # =========================
-# Export helpers
+# KNN Regressor (bitmask)
 # =========================
-def export_train_oof(oof_pred, y_train, orig_train_idx, out_path):
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["original_row_index", "oof_pred", "rating_true"])
-        for i in range(len(oof_pred)):
-            w.writerow([orig_train_idx[i], oof_pred[i], y_train[i]])
+class KNNRegressorBitmask:
+    def __init__(self, n_neighbors=50):
+        self.k = int(n_neighbors)
+        self.b_tr = None
+        self.p_tr = None
+        self.y_tr = None
+        self.m_tr = None
+        self.r_tr = None
 
-def export_test_pred_only(pred, orig_test_idx, out_path):
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["original_row_index", "pred_test"])
-        for i in range(len(pred)):
-            w.writerow([orig_test_idx[i], pred[i]])
+    @staticmethod
+    def dist2_bitmask(tb, tp, ty, tm, qb, qp, qy, qm):
+        db = tb - qb
+        dp = tp - qp
+        dy = ty - qy
+        genre_dist = (tm ^ qm).bit_count()  # tm,qm là python int
+        return db*db + dp*dp + dy*dy + genre_dist
+
+    def fit(self, b_tr, p_tr, y_tr, m_tr, r_tr):
+        self.b_tr = list(b_tr)
+        self.p_tr = list(p_tr)
+        self.y_tr = list(y_tr)
+        self.m_tr = list(m_tr)
+        self.r_tr = list(r_tr)
+        return self
+
+    def predict_one(self, qb, qp, qy, qm):
+        n = len(self.r_tr)
+        if n == 0:
+            return 0.0
+        k = self.k if self.k <= n else n
+
+        heap = []
+        sum_y = 0.0
+        hpush = heapq.heappush
+        hreplace = heapq.heapreplace
+
+        for i in range(n):
+            d2 = self.dist2_bitmask(
+                self.b_tr[i], self.p_tr[i], self.y_tr[i], self.m_tr[i],
+                qb, qp, qy, qm
+            )
+            if len(heap) < k:
+                hpush(heap, (-d2, self.r_tr[i]))
+                sum_y += self.r_tr[i]
+            else:
+                worst_d2 = -heap[0][0]
+                if d2 < worst_d2:
+                    popped = hreplace(heap, (-d2, self.r_tr[i]))
+                    sum_y += self.r_tr[i] - popped[1]
+
+        return sum_y / len(heap)
+
+    def predict(self, b_q, p_q, y_q, m_q):
+        b_q = list(b_q)
+        p_q = list(p_q)
+        y_q = list(y_q)
+        m_q = list(m_q)
+
+        out = []
+        for i in range(len(b_q)):
+            out.append(self.predict_one(b_q[i], p_q[i], y_q[i], m_q[i]))
+        return np.asarray(out, dtype=float)
+
+    def cross_validate_oof(self, b, p, y_year, m, r, n_folds=5, shuffle=True, random_state=42, verbose=True):
+        b = np.asarray(b, dtype=float)
+        p = np.asarray(p, dtype=float)
+        y_year = np.asarray(y_year, dtype=float)
+        r = np.asarray(r, dtype=float).reshape(-1)
+        m = list(m)
+
+        n = len(r)
+        idx = np.arange(n)
+        if shuffle:
+            rng = np.random.default_rng(random_state)
+            rng.shuffle(idx)
+
+        fold_sizes = np.full(n_folds, n // n_folds, dtype=int)
+        fold_sizes[: n % n_folds] += 1
+
+        oof = np.zeros(n, dtype=float)
+        fold_r2, fold_mse = [], []
+
+        cur = 0
+        for f in range(n_folds):
+            vs = cur
+            ve = cur + fold_sizes[f]
+            val_idx = idx[vs:ve]
+            tr_idx = np.concatenate([idx[:vs], idx[ve:]])
+
+            b_tr = b[tr_idx].tolist()
+            p_tr = p[tr_idx].tolist()
+            y_tr = y_year[tr_idx].tolist()
+            m_tr = [m[i] for i in tr_idx.tolist()]
+            r_tr = r[tr_idx].tolist()
+
+            b_val = b[val_idx].tolist()
+            p_val = p[val_idx].tolist()
+            y_val = y_year[val_idx].tolist()
+            m_val = [m[i] for i in val_idx.tolist()]
+            r_val = r[val_idx]
+
+            model = KNNRegressorBitmask(n_neighbors=self.k).fit(b_tr, p_tr, y_tr, m_tr, r_tr)
+            pred = model.predict(b_val, p_val, y_val, m_val)
+
+            oof[val_idx] = pred
+            fold_r2.append(r2(r_val, pred))
+            fold_mse.append(mse(r_val, pred))
+
+            cur = ve
+
+        if verbose:
+            for i, (r2v, msev) in enumerate(zip(fold_r2, fold_mse), start=1):
+                print(f"Fold {i}: R² = {r2v:.4f} | MSE = {msev:.4f}")
+            print("=" * 50)
+            print(f"Mean R²: {float(np.mean(fold_r2)):.4f} (+/- {float(np.std(fold_r2)):.4f})")
+            print("=" * 50)
+            print(f"OOF MSE: {mse(r, oof):.4f}")
+            print(f"OOF R²:  {r2(r, oof):.4f}")
+
+        return oof, fold_r2, fold_mse
 
 
 # =========================
-# MAIN
+# Runner giống LR
 # =========================
-def main():
-    budgets, pops, years, masks, ratings, orig_idx, genre_cols = load_knn_bitmask_csv(DATA_PATH)
+def run_export_pred_knn_for_stacking(
+    data_filename="data_KNN_new.csv",
+    n_folds=5,
+    seed=42,
+    knn_k=50
+):
+    csv_path = find_data_csv(data_filename)
+    df, budgets, pops, years, masks, y, feature_cols = load_selected_features_for_knn(csv_path)
 
-    print(f"Loaded: {len(ratings)} rows")
-    print(f"Features used: {NUM_COLS} + {len(genre_cols)} genre_* (bitmask)")
-    print("Note: rating KHÔNG dùng làm feature (rating là target).")
-    print(f"Split: train {int(TRAIN_RATIO*100)}% / val {int(VAL_RATIO*100)}% / test {int(TEST_RATIO*100)}%")
-    print(f"K-fold on TRAIN: {FOLDS}")
-    print(f"Mode: KNN thường (UNWEIGHTED) + Bitmask genres | K_FIXED = {K_FIXED}\n")
+    print(f"Loaded: {csv_path}")
+    print(f"Samples: {len(df)} | Features: {len(feature_cols)}")
+    print("First cols:", feature_cols[:10], "..." if len(feature_cols) > 10 else "")
+    print(f"KNN neighbors (k) = {knn_k} | OOF folds = {n_folds}")
 
-    (b_tr, p_tr, y_tr, m_tr, r_tr, id_tr), (b_va, p_va, y_va, m_va, r_va, id_va), (b_te, p_te, y_te, m_te, r_te, id_te) = \
-        split_60_20_20(budgets, pops, years, masks, ratings, orig_idx, seed=SEED)
+    train_idx, val_idx, test_idx = split_60_20_20(len(y), seed=seed)
 
-    print(f"Train: {len(r_tr)} | Val: {len(r_va)} | Test: {len(r_te)}\n")
+    # TRAIN subset
+    b_train = budgets[train_idx]
+    p_train = pops[train_idx]
+    y_train_year = years[train_idx]
+    m_train = [masks[i] for i in train_idx.tolist()]
+    y_train = y[train_idx]
 
-    # ----- OOF TRAIN -----
-    print("=== Tạo & xuất OOF predictions (TRAIN, fold=5) ===")
-    oof = compute_oof_knn(b_tr, p_tr, y_tr, m_tr, r_tr, k=K_FIXED, folds=FOLDS, seed=SEED)
-    export_train_oof(oof, r_tr, id_tr, OOF_TRAIN_OUT_PATH)
-    print(f"Đã xuất: {OOF_TRAIN_OUT_PATH}")
-    print(f"OOF Train RMSE={rmse(r_tr, oof):.4f} | MAE={mae(r_tr, oof):.4f} | R2={r2_score(r_tr, oof):.4f}\n")
+    # VAL subset
+    b_val = budgets[val_idx]
+    p_val = pops[val_idx]
+    y_val_year = years[val_idx]
+    m_val = [masks[i] for i in val_idx.tolist()]
+    y_val = y[val_idx]
 
-    # ----- VALIDATION -----
-    print("=== Đánh giá trên VALIDATION (train=TRAIN) ===")
-    pred_val = knn_predict_batch(b_tr, p_tr, y_tr, m_tr, r_tr, b_va, p_va, y_va, m_va, K_FIXED)
-    print(f"Val RMSE={rmse(r_va, pred_val):.4f} | Val MAE={mae(r_va, pred_val):.4f} | Val R2={r2_score(r_va, pred_val):.4f}\n")
+    # TEST subset
+    b_test = budgets[test_idx]
+    p_test = pops[test_idx]
+    y_test_year = years[test_idx]
+    m_test = [masks[i] for i in test_idx.tolist()]
+    y_test = y[test_idx]
 
-    # ----- TEST (train=TRAIN+VAL) -----
-    print("=== Đánh giá cuối trên TEST (train=TRAIN+VAL) ===")
-    b_final = b_tr + b_va
-    p_final = p_tr + p_va
-    y_final = y_tr + y_va
-    m_final = m_tr + m_va
-    r_final = r_tr + r_va
+    # OOF on TRAIN (giống LR)
+    model_for_oof = KNNRegressorBitmask(n_neighbors=knn_k)
+    oof_train, _, _ = model_for_oof.cross_validate_oof(
+        b_train, p_train, y_train_year, m_train, y_train,
+        n_folds=n_folds, shuffle=True, random_state=seed, verbose=True
+    )
 
-    pred_test = knn_predict_batch(b_final, p_final, y_final, m_final, r_final, b_te, p_te, y_te, m_te, K_FIXED)
-    print(f"Test RMSE={rmse(r_te, pred_test):.4f} | Test MAE={mae(r_te, pred_test):.4f} | Test R2={r2_score(r_te, pred_test):.4f}")
+    # Fit trên TRAIN rồi predict TRAIN/VAL/TEST (giống LR)
+    model = KNNRegressorBitmask(n_neighbors=knn_k).fit(
+        b_train.tolist(), p_train.tolist(), y_train_year.tolist(), m_train, y_train.tolist()
+    )
+    pred_train = model.predict(b_train.tolist(), p_train.tolist(), y_train_year.tolist(), m_train)
+    pred_val   = model.predict(b_val.tolist(), p_val.tolist(), y_val_year.tolist(), m_val)
+    pred_test  = model.predict(b_test.tolist(), p_test.tolist(), y_test_year.tolist(), m_test)
 
-    # export test predictions WITHOUT rating_true
-    export_test_pred_only(pred_test, id_te, TEST_OUT_PATH)
-    print(f"Đã xuất: {TEST_OUT_PATH}")
+    train_mse = mse(y_train, pred_train)
+    val_mse   = mse(y_val, pred_val)
+    test_mse  = mse(y_test, pred_test)
+
+    train_r2 = r2(y_train, pred_train)
+    val_r2   = r2(y_val, pred_val)
+    test_r2  = r2(y_test, pred_test)
+
+    print(f"Train samples: {len(y_train)} | Val: {len(y_val)} | Test: {len(y_test)}")
+    print(f"Train MSE={train_mse:.4f} | R²={train_r2:.4f}")
+    print(f"Val   MSE={val_mse:.4f} | R²={val_r2:.4f}")
+    print(f"Test  MSE={test_mse:.4f} | R²={test_r2:.4f}")
+
+    # In sample (chỉ hiển thị, file vẫn full precision)
+    print(f"{'i':<4} {'y_true':>8} {'y_pred':>12} {'abs_err':>10}")
+    print("-" * 40)
+    for i in range(min(10, len(y_test))):
+        ae = abs(float(y_test[i]) - float(pred_test[i]))
+        print(f"{i:<4} {float(y_test[i]):>8.2f} {float(pred_test[i]):>12.6f} {ae:>10.2f}")
+    print("-" * 40)
+
+    # export giống LR
+    out_dir = csv_path.parent
+    export_pred_csv(out_dir / "oof_knn_train.csv", train_idx, oof_train, y_train, pred_col_name="oof_pred_knn")
+    export_pred_csv(out_dir / "val_knn.csv", val_idx, pred_val, y_val, pred_col_name="pred_knn")
+    export_pred_csv(out_dir / "test_knn.csv", test_idx, pred_test, y_test, pred_col_name="pred_knn")
+
+    out_npz = out_dir / "pred_knn_60_20_20.npz"
+    np.savez(
+        out_npz,
+        oof_train=oof_train,
+        pred_train=pred_train,
+        pred_val=pred_val,
+        pred_test=pred_test,
+        y_train=y_train,
+        y_val=y_val,
+        y_test=y_test,
+        train_idx=train_idx,
+        val_idx=val_idx,
+        test_idx=test_idx,
+        feature_cols=np.array(feature_cols, dtype=object),
+        knn_k=int(knn_k),
+        oof_folds=int(n_folds),
+    )
+    print(f"\nSaved NPZ: {out_npz}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
-    main()
+    data_file = "data_KNN_new.csv"
+    folds = 5
+    seed = 42
+    knn_k = 50
+
+    args = sys.argv[1:]
+    if "--data" in args:
+        data_file = args[args.index("--data") + 1]
+    if "--k" in args:  # giữ giống script LR: --k là số folds
+        folds = int(args[args.index("--k") + 1])
+    if "--seed" in args:
+        seed = int(args[args.index("--seed") + 1])
+    if "--knn_k" in args:  # thêm option riêng cho KNN neighbors
+        knn_k = int(args[args.index("--knn_k") + 1])
+
+    run_export_pred_knn_for_stacking(data_filename=data_file, n_folds=folds, seed=seed, knn_k=knn_k)
