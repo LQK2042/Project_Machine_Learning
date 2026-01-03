@@ -1,26 +1,23 @@
-# Cao Minh Đạt - 23162015
-
 import sys
 import numpy as np
 import pandas as pd
 from pathlib import Path
 
-
+# =========================
+# Metrics
+# =========================
 def mse(y_true, y_pred) -> float:
     y_true = np.asarray(y_true, dtype=float).reshape(-1)
     y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
     return float(np.mean((y_true - y_pred) ** 2))
 
-
 def rmse(y_true, y_pred) -> float:
     return float(np.sqrt(mse(y_true, y_pred)))
-
 
 def mae(y_true, y_pred) -> float:
     y_true = np.asarray(y_true, dtype=float).reshape(-1)
     y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
     return float(np.mean(np.abs(y_true - y_pred)))
-
 
 def r2_score(y_true, y_pred) -> float:
     y_true = np.asarray(y_true, dtype=float).reshape(-1)
@@ -29,8 +26,9 @@ def r2_score(y_true, y_pred) -> float:
     ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
     return float(1.0 - ss_res / ss_tot) if ss_tot != 0 else 0.0
 
-
-
+# =========================
+# File utils
+# =========================
 def find_data_csv(filename: str) -> Path:
     p = Path(filename)
     if p.exists():
@@ -44,7 +42,9 @@ def find_data_csv(filename: str) -> Path:
 
     raise FileNotFoundError(f"Không tìm thấy file: '{filename}'.")
 
-
+# =========================
+# Split 60/20/20
+# =========================
 def split_60_20_20(n, seed=42):
     rng = np.random.default_rng(seed)
     idx = np.arange(n)
@@ -56,11 +56,13 @@ def split_60_20_20(n, seed=42):
     test_idx = idx[n_train + n_val:]
     return train_idx, val_idx, test_idx
 
-
+# =========================
+# Export predictions
+# =========================
 def export_pred_csv(path: Path, original_idx, y_pred, y_true, pred_col_name="pred_rf"):
     out = pd.DataFrame(
         {
-            "original_row_index": original_idx.astype(int),
+            "original_row_index": np.asarray(original_idx, dtype=int),
             pred_col_name: np.asarray(y_pred, dtype=float),
             "rating_true": np.asarray(y_true, dtype=float),
         }
@@ -69,14 +71,15 @@ def export_pred_csv(path: Path, original_idx, y_pred, y_true, pred_col_name="pre
     print(f"\nSaved: {path}")
     print(out.head(10).to_string(index=False))
 
-
+# =========================
+# Load selected features
+# =========================
 def load_selected_features(csv_path: Path):
     df = pd.read_csv(csv_path)
 
     target = "rating"
     required_numeric = ["budget", "popularity", "release_year"]
     genre_cols = sorted([c for c in df.columns if c.startswith("genre_")])
-
     feature_cols = required_numeric + genre_cols
 
     missing = [c for c in required_numeric + [target] if c not in df.columns]
@@ -96,30 +99,29 @@ def load_selected_features(csv_path: Path):
 
     X = df[feature_cols].to_numpy(dtype=float)
     y = df[target].to_numpy(dtype=float)
-
     return df, X, y, feature_cols
 
-
-
+# ============================================================
+# Decision Tree (Custom)
+# ============================================================
 class _TreeNode:
     __slots__ = ("feature", "threshold", "left", "right", "value")
 
     def __init__(self, feature=None, threshold=None, left=None, right=None, value=None):
-        self.feature = feature      
-        self.threshold = threshold  
-        self.left = left            
-        self.right = right          
-        self.value = value          
-
+        self.feature = feature
+        self.threshold = threshold
+        self.left = left
+        self.right = right
+        self.value = value
 
 class DecisionTreeRegressorCustom:
     def __init__(
         self,
         max_depth=None,
-        max_features=None,          
+        max_features=None,
         min_samples_split=2,
         min_samples_leaf=1,
-        n_thresholds=16,            
+        n_thresholds=16,
         random_state=42,
     ):
         self.max_depth = max_depth
@@ -179,7 +181,7 @@ class DecisionTreeRegressorCustom:
         y_node = y[idx]
         sse_node = self._sse(y_node)
         if sse_node <= 1e-12:
-            return None  
+            return None
 
         for f in feat_idx:
             col = X[idx, f]
@@ -250,7 +252,7 @@ class DecisionTreeRegressorCustom:
         return self
 
     def _predict_node(self, node: _TreeNode, X: np.ndarray, rows: np.ndarray, out: np.ndarray):
-        if node.value is not None:  
+        if node.value is not None:
             out[rows] = node.value
             return
 
@@ -273,19 +275,20 @@ class DecisionTreeRegressorCustom:
         self._predict_node(self.root, X, rows, out)
         return out
 
-
-
+# ============================================================
+# Random Forest (Custom)
+# ============================================================
 class RandomForestRegressorCustom:
     def __init__(
         self,
         n_estimators=200,
         max_depth=None,
-        max_features=0.33,        
+        max_features=0.33,
         min_samples_split=2,
         min_samples_leaf=1,
         bootstrap=True,
         random_state=42,
-        n_thresholds=16,          
+        n_thresholds=16,
     ):
         self.n_estimators = int(n_estimators)
         self.max_depth = max_depth
@@ -325,8 +328,7 @@ class RandomForestRegressorCustom:
         self._max_features_int = self._resolve_max_features(self.n_features_)
 
         self.trees_ = []
-
-        for i in range(self.n_estimators):
+        for _ in range(self.n_estimators):
             if self.bootstrap:
                 sample_idx = self._rng.integers(0, n, size=n, endpoint=False)
             else:
@@ -343,7 +345,6 @@ class RandomForestRegressorCustom:
             )
             tree.fit(self.X_, self.y_, idx=sample_idx)
             self.trees_.append(tree)
-
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
@@ -356,7 +357,9 @@ class RandomForestRegressorCustom:
         preds /= len(self.trees_)
         return preds
 
-
+# ============================================================
+# OOF for stacking (TRAIN only)
+# ============================================================
 def cross_validate_oof_rf(
     X, y,
     n_folds=5,
@@ -414,9 +417,62 @@ def cross_validate_oof_rf(
 
     return oof, fold_r2, fold_mse
 
+# ============================================================
+# ✅ AUTO TUNE RF PARAMS BY VALIDATION (không hard-code params)
+# ============================================================
+def tune_rf_by_validation(X_train, y_train, X_val, y_val, seed=42, trials=15):
+    """
+    Random search trên một số hyperparams phổ biến.
+    Fit train -> chấm RMSE trên validation -> chọn best.
+    """
+    rng = np.random.default_rng(seed)
 
+    best_params = None
+    best_val_rmse = float("inf")
 
-def run_export_pred_rf_for_stacking(data_filename="data_KNN_new.csv", n_folds=5, seed=42):
+    print("\n[TUNE RF] Auto-tune RF params by VALIDATION (RMSE) ...")
+    print(f"- Trials: {trials}")
+
+    for t in range(1, trials + 1):
+        # ---- tự động chọn (sample) param mỗi trial ----
+        params = dict(
+            n_estimators=int(rng.integers(30, 121)),               # 30..120
+            max_depth=int(rng.integers(6, 21)),                    # 6..20
+            max_features=float(rng.uniform(0.20, 0.80)),           # 0.2..0.8 (fraction)
+            min_samples_split=int(rng.choice([2, 4, 8])),
+            min_samples_leaf=int(rng.choice([1, 2, 4])),
+            bootstrap=True,
+            random_state=int(seed),
+            n_thresholds=int(rng.choice([16, 32])),
+        )
+
+        model = RandomForestRegressorCustom(**params)
+        model.fit(X_train, y_train)
+        pred_val = model.predict(X_val)
+
+        cur_rmse = rmse(y_val, pred_val)
+        cur_r2 = r2_score(y_val, pred_val)
+
+        print(
+            f"  Trial {t:02d}/{trials} | Val RMSE={cur_rmse:.4f} | R²={cur_r2:.4f} | "
+            f"n_est={params['n_estimators']}, depth={params['max_depth']}, mf={params['max_features']:.2f}, "
+            f"split={params['min_samples_split']}, leaf={params['min_samples_leaf']}, nth={params['n_thresholds']}"
+        )
+
+        if cur_rmse < best_val_rmse:
+            best_val_rmse = cur_rmse
+            best_params = params
+
+    print("\n[TUNE RF] BEST PARAMS (by Val RMSE):")
+    print(best_params)
+    print(f"[TUNE RF] BEST Val RMSE = {best_val_rmse:.4f}\n")
+
+    return best_params
+
+# ============================================================
+# Main pipeline
+# ============================================================
+def run_export_pred_rf_for_stacking(data_filename="data_KNN_new.csv", n_folds=5, seed=42, trials=15):
     csv_path = find_data_csv(data_filename)
     df, X, y, feature_cols = load_selected_features(csv_path)
 
@@ -430,27 +486,21 @@ def run_export_pred_rf_for_stacking(data_filename="data_KNN_new.csv", n_folds=5,
     X_val, y_val = X[val_idx], y[val_idx]
     X_test, y_test = X[test_idx], y[test_idx]
 
-    rf_params = dict(
-        n_estimators=50,       
-        max_depth=12,           
-        max_features=0.33,
-        min_samples_split=2,
-        min_samples_leaf=1,
-        bootstrap=True,
-        random_state=seed,
-        n_thresholds=16,
-    )
+    # ✅ 1) TUNE params bằng validation (không hard-code)
+    best_rf_params = tune_rf_by_validation(X_train, y_train, X_val, y_val, seed=seed, trials=trials)
 
+    # ✅ 2) OOF trên TRAIN (để stacking)
     oof_train, _, _ = cross_validate_oof_rf(
         X_train, y_train,
         n_folds=n_folds,
         shuffle=True,
         random_state=seed,
-        rf_params=rf_params,
+        rf_params=best_rf_params,
         verbose=True
     )
 
-    model = RandomForestRegressorCustom(**rf_params)
+    # ✅ 3) Train final model trên TRAIN, predict train/val/test (val/test chỉ để evaluate & export)
+    model = RandomForestRegressorCustom(**best_rf_params)
     model.fit(X_train, y_train)
 
     pred_train = model.predict(X_train)
@@ -479,6 +529,7 @@ def run_export_pred_rf_for_stacking(data_filename="data_KNN_new.csv", n_folds=5,
         print(f"{i:<4} {y_test[i]:>8.2f} {pred_test[i]:>10.2f} {ae:>10.2f}")
     print("-" * 36)
 
+    # ✅ 4) Export
     out_dir = csv_path.parent
     export_pred_csv(out_dir / "oof_rf_train.csv", train_idx, oof_train, y_train, pred_col_name="oof_pred_rf")
     export_pred_csv(out_dir / "val_rf.csv", val_idx, pred_val, y_val, pred_col_name="pred_rf")
@@ -498,16 +549,18 @@ def run_export_pred_rf_for_stacking(data_filename="data_KNN_new.csv", n_folds=5,
         val_idx=val_idx,
         test_idx=test_idx,
         feature_cols=np.array(feature_cols, dtype=object),
-        rf_params=np.array([str(rf_params)], dtype=object),
+        rf_best_params=np.array([str(best_rf_params)], dtype=object),
+        rf_oof_folds=int(n_folds),
+        rf_tune_trials=int(trials),
     )
     print(f"\nSaved NPZ: {out_npz}")
     print("=" * 60)
-
 
 if __name__ == "__main__":
     data_file = "data_KNN_new.csv"
     k = 5
     seed = 42
+    trials = 15
 
     args = sys.argv[1:]
     if "--data" in args:
@@ -516,5 +569,7 @@ if __name__ == "__main__":
         k = int(args[args.index("--k") + 1])
     if "--seed" in args:
         seed = int(args[args.index("--seed") + 1])
+    if "--trials" in args:
+        trials = int(args[args.index("--trials") + 1])
 
-    run_export_pred_rf_for_stacking(data_filename=data_file, n_folds=k, seed=seed)
+    run_export_pred_rf_for_stacking(data_filename=data_file, n_folds=k, seed=seed, trials=trials)
