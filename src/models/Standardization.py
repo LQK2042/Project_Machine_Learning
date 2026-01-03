@@ -8,7 +8,7 @@ OUTPUT_PATH = os.path.join("data", "data_KNN_new.csv")
 
 DROP_COLS = {"userId", "movieId"}
 TARGET_COL = "rating"
-BUDGET_COL = "budget"   # <<< thêm: cột budget để lọc budget = 0
+BUDGET_COL = "budget"   
 
 
 def clean_col(name: str) -> str:
@@ -102,13 +102,12 @@ def main():
         skipped_budget0 = 0
 
         for row in dict_reader:
-            # 1) bỏ dòng thiếu rating
+
             y = to_float(row.get(target_clean, ""))
             if y is None:
                 skipped_missing_y += 1
                 continue
 
-            # 2) bỏ dòng budget = 0 (chỉ bỏ khi budget đọc được và đúng bằng 0)
             b = to_float(row.get(budget_clean, ""))
             if b is not None and b == 0.0:
                 skipped_budget0 += 1
@@ -130,7 +129,6 @@ def main():
     binary_cols = [c for c in feature_cols if is_binary_column(col_values[c])]
     numeric_cols = [c for c in feature_cols if c not in binary_cols]
 
-    # Impute
     num_fill = {c: median(col_values[c]) for c in numeric_cols}
 
     bin_fill = {}
@@ -141,7 +139,6 @@ def main():
             cnt = Counter(col_values[c])
             bin_fill[c] = 0.0 if cnt.get(0.0, 0) >= cnt.get(1.0, 0) else 1.0
 
-    # Fit scaler (Standardization) trên dữ liệu sau khi impute
     num_mean, num_std = {}, {}
     for c in numeric_cols:
         imputed_vals = [(r[c] if r[c] is not None else num_fill[c]) for r in rows]

@@ -1,3 +1,4 @@
+# Lê Quang Khải - 23162042
 
 import sys
 import os
@@ -6,10 +7,6 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-
-# =========================
-# Utils: find file like LR
-# =========================
 def find_data_csv(filename: str) -> Path:
     p = Path(filename)
     if p.exists():
@@ -27,10 +24,6 @@ def find_data_csv(filename: str) -> Path:
         f"- Vị trí code hiện tại: {here}"
     )
 
-
-# =========================
-# Metrics (tương tự)
-# =========================
 def mse(y_true, y_pred):
     y_true = np.asarray(y_true, dtype=float).reshape(-1)
     y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
@@ -43,10 +36,6 @@ def r2(y_true, y_pred):
     ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
     return float(1.0 - ss_res / ss_tot) if ss_tot != 0 else 0.0
 
-
-# =========================
-# Split 60/20/20 (giống LR)
-# =========================
 def split_60_20_20(n, seed=42):
     rng = np.random.default_rng(seed)
     idx = np.arange(n)
@@ -58,10 +47,6 @@ def split_60_20_20(n, seed=42):
     test_idx = idx[n_train + n_val:]
     return train_idx, val_idx, test_idx
 
-
-# =========================
-# Export CSV (KHÔNG làm tròn)
-# =========================
 def export_pred_csv(path: Path, original_idx, y_pred, y_true, pred_col_name="pred_knn"):
     out = pd.DataFrame(
         {
@@ -71,16 +56,11 @@ def export_pred_csv(path: Path, original_idx, y_pred, y_true, pred_col_name="pre
         }
     ).sort_values("original_row_index", kind="mergesort")
 
-    # CÁCH 1: KHÔNG float_format => giữ full precision
     out.to_csv(path, index=False)
 
     print(f"\nSaved: {path}")
     print(out.head(10).to_string(index=False))
 
-
-# =========================
-# Load + clean giống LR/RF
-# =========================
 def load_selected_features_for_knn(csv_path: Path):
     df = pd.read_csv(csv_path, encoding="utf-8-sig")
 
@@ -109,21 +89,16 @@ def load_selected_features_for_knn(csv_path: Path):
     years   = df["release_year"].to_numpy(dtype=float)
     y       = df[target].to_numpy(dtype=float)
 
-    # genre -> bitmask python int (để dùng .bit_count())
     if genre_cols:
         G = (df[genre_cols].to_numpy(dtype=float) >= 0.5).astype(np.int64)
         powers = (1 << np.arange(len(genre_cols), dtype=np.int64))
         masks_np = (G * powers).sum(axis=1).astype(np.int64)
-        masks = [int(x) for x in masks_np]  # ép sang python int
+        masks = [int(x) for x in masks_np]  
     else:
         masks = [0] * len(df)
 
     return df, budgets, pops, years, masks, y, feature_cols
 
-
-# =========================
-# KNN Regressor (bitmask)
-# =========================
 class KNNRegressorBitmask:
     def __init__(self, n_neighbors=50):
         self.k = int(n_neighbors)
@@ -138,7 +113,7 @@ class KNNRegressorBitmask:
         db = tb - qb
         dp = tp - qp
         dy = ty - qy
-        genre_dist = (tm ^ qm).bit_count()  # tm,qm là python int
+        genre_dist = (tm ^ qm).bit_count() 
         return db*db + dp*dp + dy*dy + genre_dist
 
     def fit(self, b_tr, p_tr, y_tr, m_tr, r_tr):
@@ -245,10 +220,6 @@ class KNNRegressorBitmask:
 
         return oof, fold_r2, fold_mse
 
-
-# =========================
-# Runner giống LR
-# =========================
 def run_export_pred_knn_for_stacking(
     data_filename="data_KNN_new.csv",
     n_folds=5,
@@ -265,35 +236,30 @@ def run_export_pred_knn_for_stacking(
 
     train_idx, val_idx, test_idx = split_60_20_20(len(y), seed=seed)
 
-    # TRAIN subset
     b_train = budgets[train_idx]
     p_train = pops[train_idx]
     y_train_year = years[train_idx]
     m_train = [masks[i] for i in train_idx.tolist()]
     y_train = y[train_idx]
 
-    # VAL subset
     b_val = budgets[val_idx]
     p_val = pops[val_idx]
     y_val_year = years[val_idx]
     m_val = [masks[i] for i in val_idx.tolist()]
     y_val = y[val_idx]
 
-    # TEST subset
     b_test = budgets[test_idx]
     p_test = pops[test_idx]
     y_test_year = years[test_idx]
     m_test = [masks[i] for i in test_idx.tolist()]
     y_test = y[test_idx]
 
-    # OOF on TRAIN (giống LR)
     model_for_oof = KNNRegressorBitmask(n_neighbors=knn_k)
     oof_train, _, _ = model_for_oof.cross_validate_oof(
         b_train, p_train, y_train_year, m_train, y_train,
         n_folds=n_folds, shuffle=True, random_state=seed, verbose=True
     )
 
-    # Fit trên TRAIN rồi predict TRAIN/VAL/TEST (giống LR)
     model = KNNRegressorBitmask(n_neighbors=knn_k).fit(
         b_train.tolist(), p_train.tolist(), y_train_year.tolist(), m_train, y_train.tolist()
     )
@@ -314,7 +280,6 @@ def run_export_pred_knn_for_stacking(
     print(f"Val   MSE={val_mse:.4f} | R²={val_r2:.4f}")
     print(f"Test  MSE={test_mse:.4f} | R²={test_r2:.4f}")
 
-    # In sample (chỉ hiển thị, file vẫn full precision)
     print(f"{'i':<4} {'y_true':>8} {'y_pred':>12} {'abs_err':>10}")
     print("-" * 40)
     for i in range(min(10, len(y_test))):
@@ -322,7 +287,6 @@ def run_export_pred_knn_for_stacking(
         print(f"{i:<4} {float(y_test[i]):>8.2f} {float(pred_test[i]):>12.6f} {ae:>10.2f}")
     print("-" * 40)
 
-    # export giống LR
     out_dir = csv_path.parent
     export_pred_csv(out_dir / "oof_knn_train.csv", train_idx, oof_train, y_train, pred_col_name="oof_pred_knn")
     export_pred_csv(out_dir / "val_knn.csv", val_idx, pred_val, y_val, pred_col_name="pred_knn")
@@ -358,11 +322,11 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     if "--data" in args:
         data_file = args[args.index("--data") + 1]
-    if "--k" in args:  # giữ giống script LR: --k là số folds
+    if "--k" in args:  
         folds = int(args[args.index("--k") + 1])
     if "--seed" in args:
         seed = int(args[args.index("--seed") + 1])
-    if "--knn_k" in args:  # thêm option riêng cho KNN neighbors
+    if "--knn_k" in args: 
         knn_k = int(args[args.index("--knn_k") + 1])
 
     run_export_pred_knn_for_stacking(data_filename=data_file, n_folds=folds, seed=seed, knn_k=knn_k)
