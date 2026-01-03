@@ -5,8 +5,30 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
+def mse(y_true, y_pred) -> float:
+    y_true = np.asarray(y_true, dtype=float).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+    return float(np.mean((y_true - y_pred) ** 2))
+
+
+def rmse(y_true, y_pred) -> float:
+    return float(np.sqrt(mse(y_true, y_pred)))
+
+
+def mae(y_true, y_pred) -> float:
+    y_true = np.asarray(y_true, dtype=float).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+    return float(np.mean(np.abs(y_true - y_pred)))
+
+
+def r2_score(y_true, y_pred) -> float:
+    y_true = np.asarray(y_true, dtype=float).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
+    ss_res = float(np.sum((y_true - y_pred) ** 2))
+    ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
+    return float(1.0 - ss_res / ss_tot) if ss_tot != 0 else 0.0
+
 
 
 def find_data_csv(filename: str) -> Path:
@@ -20,11 +42,7 @@ def find_data_csv(filename: str) -> Path:
         if cand.exists():
             return cand.resolve()
 
-    raise FileNotFoundError(
-        f"Không tìm thấy file: '{filename}'.\n"
-        # f"- Hãy đặt file vào thư mục 'data/' của project hoặc truyền đường dẫn đầy đủ.\n"
-        # f"- Vị trí code hiện tại: {here}"
-    )
+    raise FileNotFoundError(f"Không tìm thấy file: '{filename}'.")
 
 
 def split_60_20_20(n, seed=42):
@@ -63,7 +81,7 @@ def load_selected_features(csv_path: Path):
 
     missing = [c for c in required_numeric + [target] if c not in df.columns]
     if missing:
-        raise ValueError(f"Thiếu cột bắt buộc: {missing}\nHiện có: {list(df.columns)[:40]} ...")
+        raise ValueError(f"Thiếu cột bắt buộc: {missing}")
 
     for c in feature_cols + [target]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -82,6 +100,263 @@ def load_selected_features(csv_path: Path):
     return df, X, y, feature_cols
 
 
+
+class _TreeNode:
+    __slots__ = ("feature", "threshold", "left", "right", "value")
+
+    def __init__(self, feature=None, threshold=None, left=None, right=None, value=None):
+        self.feature = feature      
+        self.threshold = threshold  
+        self.left = left            
+        self.right = right          
+        self.value = value          
+
+
+class DecisionTreeRegressorCustom:
+    def __init__(
+        self,
+        max_depth=None,
+        max_features=None,          
+        min_samples_split=2,
+        min_samples_leaf=1,
+        n_thresholds=16,            
+        random_state=42,
+    ):
+        self.max_depth = max_depth
+        self.max_features = max_features
+        self.min_samples_split = int(min_samples_split)
+        self.min_samples_leaf = int(min_samples_leaf)
+        self.n_thresholds = int(n_thresholds)
+        self.random_state = int(random_state)
+
+        self.root = None
+        self._rng = np.random.default_rng(self.random_state)
+
+        self.X_ = None
+        self.y_ = None
+        self.n_features_ = 0
+
+    @staticmethod
+    def _sse(y):
+        n = y.size
+        if n == 0:
+            return 0.0
+        s1 = float(np.sum(y))
+        s2 = float(np.sum(y * y))
+        return s2 - (s1 * s1) / n
+
+    def _candidate_thresholds(self, col: np.ndarray):
+        uniq = np.unique(col)
+        if uniq.size <= 1:
+            return np.array([], dtype=float)
+
+        if uniq.size <= 20:
+            thr = (uniq[:-1] + uniq[1:]) / 2.0
+            return thr.astype(float)
+
+        qs = np.linspace(0.05, 0.95, num=self.n_thresholds)
+        thr = np.quantile(col, qs)
+        thr = np.unique(thr)
+        return thr.astype(float)
+
+    def _best_split(self, idx: np.ndarray, depth: int):
+        X = self.X_
+        y = self.y_
+        n = idx.size
+
+        # feature subset
+        if self.max_features is None or self.max_features >= self.n_features_:
+            feat_idx = np.arange(self.n_features_)
+        else:
+            feat_idx = self._rng.choice(self.n_features_, size=self.max_features, replace=False)
+
+        best_feature = None
+        best_threshold = None
+        best_sse = float("inf")
+        best_left = None
+        best_right = None
+
+        y_node = y[idx]
+        sse_node = self._sse(y_node)
+        if sse_node <= 1e-12:
+            return None  
+
+        for f in feat_idx:
+            col = X[idx, f]
+            thresholds = self._candidate_thresholds(col)
+            if thresholds.size == 0:
+                continue
+
+            for t in thresholds:
+                mask_left = col <= t
+                n_left = int(np.sum(mask_left))
+                n_right = n - n_left
+
+                if n_left < self.min_samples_leaf or n_right < self.min_samples_leaf:
+                    continue
+
+                left_idx = idx[mask_left]
+                right_idx = idx[~mask_left]
+
+                sse_left = self._sse(y[left_idx])
+                sse_right = self._sse(y[right_idx])
+                sse_split = sse_left + sse_right
+
+                if sse_split < best_sse:
+                    best_sse = sse_split
+                    best_feature = int(f)
+                    best_threshold = float(t)
+                    best_left = left_idx
+                    best_right = right_idx
+
+        if best_feature is None:
+            return None
+
+        return best_feature, best_threshold, best_left, best_right
+
+    def _build(self, idx: np.ndarray, depth: int):
+        y = self.y_[idx]
+        node_value = float(np.mean(y)) if y.size > 0 else 0.0
+
+        if self.max_depth is not None and depth >= self.max_depth:
+            return _TreeNode(value=node_value)
+
+        if idx.size < self.min_samples_split:
+            return _TreeNode(value=node_value)
+
+        if idx.size < 2 * self.min_samples_leaf:
+            return _TreeNode(value=node_value)
+
+        split = self._best_split(idx, depth)
+        if split is None:
+            return _TreeNode(value=node_value)
+
+        f, t, left_idx, right_idx = split
+        left_node = self._build(left_idx, depth + 1)
+        right_node = self._build(right_idx, depth + 1)
+        return _TreeNode(feature=f, threshold=t, left=left_node, right=right_node, value=None)
+
+    def fit(self, X: np.ndarray, y: np.ndarray, idx: np.ndarray | None = None):
+        self.X_ = np.asarray(X, dtype=float)
+        self.y_ = np.asarray(y, dtype=float).reshape(-1)
+        self.n_features_ = self.X_.shape[1]
+
+        if idx is None:
+            idx = np.arange(self.X_.shape[0])
+        else:
+            idx = np.asarray(idx, dtype=int)
+
+        self.root = self._build(idx, depth=0)
+        return self
+
+    def _predict_node(self, node: _TreeNode, X: np.ndarray, rows: np.ndarray, out: np.ndarray):
+        if node.value is not None:  
+            out[rows] = node.value
+            return
+
+        f = node.feature
+        t = node.threshold
+        col = X[rows, f]
+        mask_left = col <= t
+        left_rows = rows[mask_left]
+        right_rows = rows[~mask_left]
+
+        if left_rows.size > 0:
+            self._predict_node(node.left, X, left_rows, out)
+        if right_rows.size > 0:
+            self._predict_node(node.right, X, right_rows, out)
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        X = np.asarray(X, dtype=float)
+        out = np.zeros(X.shape[0], dtype=float)
+        rows = np.arange(X.shape[0], dtype=int)
+        self._predict_node(self.root, X, rows, out)
+        return out
+
+
+
+class RandomForestRegressorCustom:
+    def __init__(
+        self,
+        n_estimators=200,
+        max_depth=None,
+        max_features=0.33,        
+        min_samples_split=2,
+        min_samples_leaf=1,
+        bootstrap=True,
+        random_state=42,
+        n_thresholds=16,          
+    ):
+        self.n_estimators = int(n_estimators)
+        self.max_depth = max_depth
+        self.max_features = max_features
+        self.min_samples_split = int(min_samples_split)
+        self.min_samples_leaf = int(min_samples_leaf)
+        self.bootstrap = bool(bootstrap)
+        self.random_state = int(random_state)
+        self.n_thresholds = int(n_thresholds)
+
+        self.trees_ = []
+        self._rng = np.random.default_rng(self.random_state)
+        self._max_features_int = None
+
+        self.X_ = None
+        self.y_ = None
+        self.n_features_ = 0
+
+    def _resolve_max_features(self, n_features: int) -> int:
+        mf = self.max_features
+        if mf is None:
+            return n_features
+        if isinstance(mf, (int, np.integer)):
+            return max(1, min(int(mf), n_features))
+        mf = float(mf)
+        if mf <= 0:
+            return 1
+        if mf <= 1:
+            return max(1, min(int(round(mf * n_features)), n_features))
+        return max(1, min(int(mf), n_features))
+
+    def fit(self, X: np.ndarray, y: np.ndarray):
+        self.X_ = np.asarray(X, dtype=float)
+        self.y_ = np.asarray(y, dtype=float).reshape(-1)
+        n = self.X_.shape[0]
+        self.n_features_ = self.X_.shape[1]
+        self._max_features_int = self._resolve_max_features(self.n_features_)
+
+        self.trees_ = []
+
+        for i in range(self.n_estimators):
+            if self.bootstrap:
+                sample_idx = self._rng.integers(0, n, size=n, endpoint=False)
+            else:
+                sample_idx = np.arange(n, dtype=int)
+
+            tree_seed = int(self._rng.integers(0, 2**31 - 1))
+            tree = DecisionTreeRegressorCustom(
+                max_depth=self.max_depth,
+                max_features=self._max_features_int,
+                min_samples_split=self.min_samples_split,
+                min_samples_leaf=self.min_samples_leaf,
+                n_thresholds=self.n_thresholds,
+                random_state=tree_seed,
+            )
+            tree.fit(self.X_, self.y_, idx=sample_idx)
+            self.trees_.append(tree)
+
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        X = np.asarray(X, dtype=float)
+        if not self.trees_:
+            raise ValueError("Model chưa fit.")
+        preds = np.zeros(X.shape[0], dtype=float)
+        for tree in self.trees_:
+            preds += tree.predict(X)
+        preds /= len(self.trees_)
+        return preds
+
+
 def cross_validate_oof_rf(
     X, y,
     n_folds=5,
@@ -90,7 +365,6 @@ def cross_validate_oof_rf(
     rf_params=None,
     verbose=True
 ):
-    
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=float).reshape(-1)
     n = X.shape[0]
@@ -116,13 +390,16 @@ def cross_validate_oof_rf(
         X_tr, y_tr = X[tr_idx], y[tr_idx]
         X_val, y_val = X[val_idx], y[val_idx]
 
-        model = RandomForestRegressor(**(rf_params or {}))
+        params = dict(rf_params or {})
+        params["random_state"] = int(params.get("random_state", random_state) + f)
+
+        model = RandomForestRegressorCustom(**params)
         model.fit(X_tr, y_tr)
         pred = model.predict(X_val)
 
         oof[val_idx] = pred
         fold_r2.append(r2_score(y_val, pred))
-        fold_mse.append(mean_squared_error(y_val, pred))
+        fold_mse.append(mse(y_val, pred))
 
         cur = ve
 
@@ -132,10 +409,11 @@ def cross_validate_oof_rf(
         print("=" * 50)
         print(f"Mean R²: {float(np.mean(fold_r2)):.4f} (+/- {float(np.std(fold_r2)):.4f})")
         print("=" * 50)
-        print(f"OOF MSE: {mean_squared_error(y, oof):.4f}")
+        print(f"OOF MSE: {mse(y, oof):.4f}")
         print(f"OOF R²:  {r2_score(y, oof):.4f}")
 
     return oof, fold_r2, fold_mse
+
 
 
 def run_export_pred_rf_for_stacking(data_filename="data_KNN_new.csv", n_folds=5, seed=42):
@@ -153,15 +431,14 @@ def run_export_pred_rf_for_stacking(data_filename="data_KNN_new.csv", n_folds=5,
     X_test, y_test = X[test_idx], y[test_idx]
 
     rf_params = dict(
-        n_estimators=1000,
-        max_depth=None,
+        n_estimators=50,       
+        max_depth=12,           
         max_features=0.33,
         min_samples_split=2,
         min_samples_leaf=1,
-        random_state=seed,
-        n_jobs=-1,
         bootstrap=True,
-        oob_score=False,
+        random_state=seed,
+        n_thresholds=16,
     )
 
     oof_train, _, _ = cross_validate_oof_rf(
@@ -173,26 +450,22 @@ def run_export_pred_rf_for_stacking(data_filename="data_KNN_new.csv", n_folds=5,
         verbose=True
     )
 
-    model = RandomForestRegressor(**rf_params)
+    model = RandomForestRegressorCustom(**rf_params)
     model.fit(X_train, y_train)
 
     pred_train = model.predict(X_train)
     pred_val = model.predict(X_val)
     pred_test = model.predict(X_test)
 
-    train_mse = mean_squared_error(y_train, pred_train)
-    val_mse = mean_squared_error(y_val, pred_val)
-    test_mse = mean_squared_error(y_test, pred_test)
-
-    train_rmse = np.sqrt(train_mse)
-    val_rmse = np.sqrt(val_mse)
-    test_rmse = np.sqrt(test_mse)
+    train_rmse = rmse(y_train, pred_train)
+    val_rmse = rmse(y_val, pred_val)
+    test_rmse = rmse(y_test, pred_test)
 
     train_r2 = r2_score(y_train, pred_train)
     val_r2 = r2_score(y_val, pred_val)
     test_r2 = r2_score(y_test, pred_test)
 
-    test_mae = mean_absolute_error(y_test, pred_test)
+    test_mae = mae(y_test, pred_test)
 
     print(f"\nTrain samples: {len(y_train)} | Val: {len(y_val)} | Test: {len(y_test)}")
     print(f"Train RMSE={train_rmse:.4f} | R²={train_r2:.4f}")
