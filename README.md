@@ -153,9 +153,9 @@ Sau khi chạy, bạn sẽ có (tuỳ cách implement):
 ---
 
 ## 10) License
-Dùng cho mục đích học tập / đồ án. (Nếu cần, hãy thêm MIT License hoặc license phù hợp.)
+- Dùng cho mục đích học tập / đồ án.
 
 ---
 
-## 11) Acknowledgements
-- Tài liệu/slide môn Machine Learning (Linear Regression, KNN, Decision Tree/Random Forest, …)
+## 11) References
+- Tài liệu/slide môn Machine Learning (Linear Regression, KNN, Decision Tree/Random Forest, …) ở trong mục pdf.
