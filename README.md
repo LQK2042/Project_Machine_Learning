@@ -43,15 +43,15 @@ Trọng tâm của repo là **Stacking Ensemble**: kết hợp nhiều mô hình
 - **Random Forest Regression**: ensemble nhiều decision tree, mỗi cây học từ bootstrap + chọn ngẫu nhiên tập con feature ở mỗi node.
 - **GBDT**: mô hình boosting, cộng dồn các cây nhỏ để giảm dần residual.
 
-### Meta model (điểm nhấn của repo)
+### Meta model 
 - **Ridge Regression (stacking meta-model)**: học cách kết hợp dự đoán của base models, ổn định hơn khi các base models có tương quan (regularization L2 giúp giảm overfit).
 
 ---
 
-## 4) Kết quả (tóm tắt)
+## 4) Kết quả 
 > Số liệu có thể thay đổi tuỳ lần chạy/tuning. Repo lưu các file dự đoán/OOF để tái lập kết quả.
 
-**Random Forest (best theo Validation RMSE)**  
+**Random Forest**  
 - Best params (val RMSE tốt nhất):  
   `n_estimators=95, max_depth=17, max_features≈0.2769, min_samples_split=8, min_samples_leaf=2, bootstrap=True, random_state=42`  
 - Split: Train 49135 | Val 16378 | Test 16379  
@@ -60,13 +60,13 @@ Trọng tâm của repo là **Stacking Ensemble**: kết hợp nhiều mô hình
   - Val: **RMSE=0.9560**, R²=0.1722
   - Test: RMSE=0.9743, R²=0.1641, MAE=0.7634
 
-**Stacking Ridge (meta-model)**  
+**Stacking Ridge**  
 - Mục tiêu: giảm RMSE so với từng base model nhờ tận dụng “điểm mạnh” khác nhau của LR/KNN/Tree/Boosting.
 - Repo có thể kèm **ablation** (bỏ bớt 1 base model) để thấy ảnh hưởng từng thành phần lên kết quả cuối.
 
 ---
 
-## 5) Cấu trúc thư mục (gợi ý)
+## 5) Cấu trúc thư mục 
 ```
 .
 ├─ data/
@@ -98,7 +98,7 @@ Trọng tâm của repo là **Stacking Ensemble**: kết hợp nhiều mô hình
 
 ---
 
-## 6) Cách chạy (Reproducibility)
+## 6) Cách chạy 
 ### Yêu cầu
 - Python 3.10+
 - Các thư viện thường dùng: `numpy`, `pandas` (tuỳ script có thể cần thêm thư viện khác)
@@ -122,14 +122,14 @@ python src/rf_tuned.py   --data data/data_processed.csv --k 5 --seed 42 --trials
 python src/gbdt_tuned.py --data data/data_processed.csv --k 5 --seed 42 --trials 15
 ```
 
-### (3) Train meta-model Ridge (stacking)
+### (3) Train meta-model Ridge
 ```bash
 python src/meta_ridge_4base_poly_manual.py
 ```
 
 ---
 
-## 7) Output / Artifacts
+## 7) Output
 Sau khi chạy, bạn sẽ có (tuỳ cách implement):
 - `data/oof_*_train.csv`: OOF predictions cho train (dùng để fit meta-model)
 - `data/test_*.csv`: dự đoán trên test (phần 20%)
@@ -143,7 +143,7 @@ Sau khi chạy, bạn sẽ có (tuỳ cách implement):
 
 ---
 
-## 9) Thành viên / Tác giả
+## 9) Thành viên 
 
 - Phạm Lê Anh Duy - 23162012
 - Cao Minh Đạt - 23162015
