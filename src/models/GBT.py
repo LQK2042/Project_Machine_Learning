@@ -1,11 +1,3 @@
-# ============================================================
-# GBDT for Stacking (60/20/20) + TUNE on 20% VALIDATION
-# Author: (theo yêu cầu của bạn) - NO sklearn
-#
-# - Split 60/20/20
-# - Tune (n_estimators, max_depth, learning_rate, subsample, min_leaf) on validation
-# - Build OOF on train via K-fold -> export CSV/NPZ for stacking
-# ============================================================
 
 import sys
 import os
@@ -13,9 +5,6 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-# -------------------------
-# 1) Utils: load file path
-# -------------------------
 def find_data_csv(filename: str) -> Path:
     p = Path(filename)
     if p.exists():
@@ -33,9 +22,6 @@ def find_data_csv(filename: str) -> Path:
         f"- Vị trí code hiện tại: {here}"
     )
 
-# -------------------------
-# 2) Metrics
-# -------------------------
 def mse(y_true, y_pred):
     y_true = np.asarray(y_true, dtype=float).reshape(-1)
     y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
@@ -56,9 +42,6 @@ def r2(y_true, y_pred):
     ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
     return float(1.0 - ss_res / ss_tot) if ss_tot != 0 else 0.0
 
-# -------------------------
-# 3) Split 60/20/20
-# -------------------------
 def split_60_20_20(n, seed=42):
     rng = np.random.default_rng(seed)
     idx = np.arange(n)
@@ -70,9 +53,6 @@ def split_60_20_20(n, seed=42):
     test_idx = idx[n_train + n_val:]
     return train_idx, val_idx, test_idx
 
-# -------------------------
-# 4) Export predictions
-# -------------------------
 def export_pred_csv(path: Path, original_idx, y_pred, y_true, pred_col_name="pred_gbdt"):
     out = pd.DataFrame(
         {
@@ -86,9 +66,6 @@ def export_pred_csv(path: Path, original_idx, y_pred, y_true, pred_col_name="pre
     print(f"\nSaved: {path}")
     print(out.head(10).to_string(index=False))
 
-# -------------------------
-# 5) Load selected features (budget, popularity, release_year + genre_*)
-# -------------------------
 def load_selected_features(csv_path: Path):
     df = pd.read_csv(csv_path, encoding="utf-8-sig")
 
@@ -101,14 +78,12 @@ def load_selected_features(csv_path: Path):
     if missing:
         raise ValueError(f"Thiếu cột bắt buộc: {missing}\nHiện có: {list(df.columns)[:40]} ...")
 
-    # numeric convert
     for c in feature_cols + [target]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     df = df.dropna(subset=[target]).copy()
 
-    # fill missing
     for c in required_numeric:
         df[c] = df[c].fillna(df[c].median())
     for c in genre_cols:
@@ -118,13 +93,6 @@ def load_selected_features(csv_path: Path):
     y = df[target].to_numpy(dtype=float)
 
     return df, X, y, feature_cols
-
-
-# ============================================================
-# 6) Regression Tree (CART) - simplified & fast-ish:
-#    - split by reducing SSE
-#    - for each node: sample a limited number of split points per feature (quantile indices)
-# ============================================================
 
 class _TreeNode:
     __slots__ = ("is_leaf", "value", "feat", "thr", "left", "right")
@@ -156,7 +124,7 @@ class RegressionTree:
 
     @staticmethod
     def _sse(sum_y, sum_y2, n):
-        # SSE = sum(y^2) - (sum(y)^2)/n
+
         if n <= 0:
             return 0.0
         return float(sum_y2 - (sum_y * sum_y) / n)
@@ -170,7 +138,7 @@ class RegressionTree:
         return self
 
     def _best_split_for_feature(self, Xf, y, idx):
-        # returns (best_gain, best_thr) for a single feature at current node
+
         x = Xf[idx]
         r = y[idx]
         n = len(idx)
@@ -181,7 +149,6 @@ class RegressionTree:
         x_sorted = x[order]
         r_sorted = r[order]
 
-        # prefix sums
         pref = np.cumsum(r_sorted)
         pref2 = np.cumsum(r_sorted * r_sorted)
 
@@ -189,8 +156,6 @@ class RegressionTree:
         total_sum2 = float(pref2[-1])
         base_sse = self._sse(total_sum, total_sum2, n)
 
-        # choose candidate split indices (quantile-like positions)
-        # ensure within [min_leaf, n-min_leaf]
         left_min = self.min_samples_leaf
         right_min = self.min_samples_leaf
         lo = left_min
@@ -198,7 +163,6 @@ class RegressionTree:
         if lo >= hi:
             return (0.0, None)
 
-        # evenly spaced candidate indices
         k = min(self.max_splits_per_feature, hi - lo)
         if k <= 0:
             return (0.0, None)
@@ -210,7 +174,7 @@ class RegressionTree:
         best_thr = None
 
         for s in cand:
-            # split between s-1 and s
+
             if s <= 0 or s >= n:
                 continue
             if x_sorted[s - 1] == x_sorted[s]:
@@ -236,11 +200,10 @@ class RegressionTree:
         return (best_gain, best_thr)
 
     def _build(self, X, y, idx, depth):
-        # leaf value is mean(y) at this node
+
         r = y[idx]
         node_value = float(np.mean(r)) if len(r) else 0.0
 
-        # stop criteria
         if depth >= self.max_depth:
             return _TreeNode(is_leaf=True, value=node_value)
         if len(idx) < self.min_samples_split:
@@ -251,7 +214,6 @@ class RegressionTree:
         best_feat = None
         best_thr = None
 
-        # try all features
         for f in range(d):
             gain, thr = self._best_split_for_feature(X[:, f], y, idx)
             if thr is None:
@@ -261,11 +223,9 @@ class RegressionTree:
                 best_feat = f
                 best_thr = thr
 
-        # if no useful split
         if best_feat is None or best_gain < self.min_gain:
             return _TreeNode(is_leaf=True, value=node_value)
 
-        # split
         xnode = X[idx, best_feat]
         left_mask = xnode <= best_thr
         right_mask = ~left_mask
@@ -296,14 +256,6 @@ class RegressionTree:
         for i in range(X.shape[0]):
             out[i] = self._predict_one(X[i], self.root)
         return out
-
-
-# ============================================================
-# 7) GBDT Regressor (squared loss)
-#    F0 = mean(y)
-#    residual = y - pred
-#    pred += lr * tree(residual)
-# ============================================================
 
 class GBDTRegressorManual:
     def __init__(
@@ -350,7 +302,6 @@ class GBDTRegressorManual:
         for t in range(self.n_estimators):
             resid = y - pred
 
-            # subsample rows
             if self.subsample < 1.0:
                 m = max(2, int(len(y) * self.subsample))
                 samp_idx = rng.choice(len(y), size=m, replace=False)
@@ -373,7 +324,6 @@ class GBDTRegressorManual:
             pred = pred + self.learning_rate * update
             self.trees_.append(tree)
 
-            # optional early stopping
             if X_val is not None and y_val is not None and early_stopping_rounds and early_stopping_rounds > 0:
                 val_pred = self.predict(X_val)
                 cur = rmse(y_val, val_pred)
@@ -387,7 +337,6 @@ class GBDTRegressorManual:
                     print(f"[GBDT] iter={t+1}/{self.n_estimators} val_RMSE={cur:.6f} best={best_val_rmse:.6f} patience={patience}")
 
                 if patience >= early_stopping_rounds:
-                    # keep trees up to best_iter
                     if best_iter >= 0:
                         self.trees_ = self.trees_[: best_iter + 1]
                     break
@@ -468,10 +417,6 @@ class GBDTRegressorManual:
 
         return oof, fold_rmse
 
-
-# ============================================================
-# 8) TUNE on VALIDATION (20%)
-# ============================================================
 def tune_gbdt_on_validation(
     X_train, y_train,
     X_val, y_val,
@@ -482,7 +427,6 @@ def tune_gbdt_on_validation(
     rng = np.random.default_rng(seed)
     n_val = len(y_val)
 
-    # sample validation for faster tune
     if tune_val_size is None or tune_val_size < 0 or tune_val_size >= n_val:
         sub = np.arange(n_val)
     else:
@@ -513,10 +457,6 @@ def tune_gbdt_on_validation(
     print(f"\n[TUNE GBDT] Best cfg = {best_cfg} | RMSE={best_rm:.6f}\n")
     return best_cfg
 
-
-# ============================================================
-# 9) Main pipeline
-# ============================================================
 def run_export_pred_gbdt_for_stacking(
     data_filename="data_KNN_new.csv",
     n_folds=5,
@@ -531,14 +471,11 @@ def run_export_pred_gbdt_for_stacking(
     print(f"Samples: {len(df)} | Features: {len(feature_cols)}")
     print("First cols:", feature_cols[:10], "..." if len(feature_cols) > 10 else "")
 
-    # ---- split 60/20/20
     train_idx, val_idx, test_idx = split_60_20_20(len(y), seed=seed)
     X_train, y_train = X[train_idx], y[train_idx]
     X_val, y_val = X[val_idx], y[val_idx]
     X_test, y_test = X[test_idx], y[test_idx]
 
-    # ---- tune
-    # Bạn có thể mở rộng grid. Grid dưới đây là “vừa đủ” để thấy khác biệt.
     grid = [
         dict(n_estimators=200, learning_rate=0.05, max_depth=3, min_samples_leaf=10, subsample=1.0, max_splits_per_feature=32, clip_pred=(1.0, 5.0)),
         dict(n_estimators=400, learning_rate=0.05, max_depth=3, min_samples_leaf=10, subsample=0.8, max_splits_per_feature=32, clip_pred=(1.0, 5.0)),
@@ -558,14 +495,12 @@ def run_export_pred_gbdt_for_stacking(
         best_cfg = grid[0]
         print("[INFO] --no_tune => dùng cfg mặc định:", best_cfg)
 
-    # ---- OOF on TRAIN for stacking
     print(f"\n[OOF] Build OOF with cfg={best_cfg}, folds={n_folds}")
     oof_model = GBDTRegressorManual(**best_cfg, random_state=seed)
     oof_train, _ = oof_model.cross_validate_oof(
         X_train, y_train, n_folds=n_folds, shuffle=True, random_state=seed, verbose=True
     )
 
-    # ---- Fit on full TRAIN and predict train/val/test
     model = GBDTRegressorManual(**best_cfg, random_state=seed)
     model.fit(X_train, y_train)
 
@@ -573,13 +508,11 @@ def run_export_pred_gbdt_for_stacking(
     pred_val = model.predict(X_val)
     pred_test = model.predict(X_test)
 
-    # ---- Metrics
     print(f"\nTrain samples: {len(y_train)} | Val: {len(y_val)} | Test: {len(y_test)}")
     print(f"Train RMSE={rmse(y_train, pred_train):.4f} | R²={r2(y_train, pred_train):.4f} | MAE={mae(y_train, pred_train):.4f}")
     print(f"Val   RMSE={rmse(y_val, pred_val):.4f} | R²={r2(y_val, pred_val):.4f} | MAE={mae(y_val, pred_val):.4f}")
     print(f"Test  RMSE={rmse(y_test, pred_test):.4f} | R²={r2(y_test, pred_test):.4f} | MAE={mae(y_test, pred_test):.4f}")
 
-    # ---- Export
     out_dir = csv_path.parent
     export_pred_csv(out_dir / "oof_gbdt_train.csv", train_idx, oof_train, y_train, pred_col_name="oof_pred_gbdt")
     export_pred_csv(out_dir / "val_gbdt.csv", val_idx, pred_val, y_val, pred_col_name="pred_gbdt")
@@ -605,10 +538,6 @@ def run_export_pred_gbdt_for_stacking(
     print(f"\nSaved NPZ: {out_npz}")
     print("=" * 60)
 
-
-# ============================================================
-# 10) CLI
-# ============================================================
 if __name__ == "__main__":
     data_file = "data_KNN_new.csv"
     folds = 5

@@ -1,21 +1,14 @@
-# meta_ridge_4base_poly_manual.py
-# Ridge meta-model stacking (NO sklearn) + nonlinear meta-features
-# Base: LR, RF, KNN, GBDT
 
 import os
 import numpy as np
 import pandas as pd
 from pathlib import Path
 
-# ============================================================
-# CONFIG: SỬA ĐÚNG TÊN FILE CỦA BẠN (8 FILE)
-# ============================================================
-# Get project root directory (2 levels up from this script)
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 
-# 4 file OOF TRAIN (60% train part)
 TRAIN_BASE_FILES = [
     DATA_DIR / "oof_lr_train.csv",
     DATA_DIR / "oof_rf_train.csv",
@@ -23,7 +16,6 @@ TRAIN_BASE_FILES = [
     DATA_DIR / "oof_gbdt_train.csv",
 ]
 
-# 4 file TEST PRED (20% test part)
 TEST_BASE_FILES = [
     DATA_DIR / "test_lr.csv",
     DATA_DIR / "test_rf.csv",
@@ -36,23 +28,17 @@ OUT_TEST_PRED = DATA_DIR / "stack_ridge_poly_test_pred.csv"
 INDEX_COL = "original_row_index"
 TRUE_COL = "rating_true"
 
-# clip rating
-CLIP_RANGE = (1.0, 5.0)     # None nếu không muốn clip
+CLIP_RANGE = (1.0, 5.0)   
 
-# alpha tuning (không CLI)
 ALPHAS = np.logspace(-4, 4, 60)
 CV_FOLDS = 5
 SEED = 42
 
-# Nonlinear meta features
 USE_SQUARES = True
 USE_INTERACTIONS = True
 USE_ABS_DIFFS = True
 USE_STATS = True
 
-# ============================================================
-# Helpers: IO + merge
-# ============================================================
 def _clean_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip().lstrip("\ufeff") for c in df.columns]
@@ -67,7 +53,6 @@ def _detect_pred_col(df: pd.DataFrame, index_col: str, true_col: str | None) -> 
     if len(candidates) == 1:
         return candidates[0]
 
-    # fallback theo keyword
     keys = ["oof_pred", "pred", "y_pred", "prediction", "rating_pred"]
     for kw in keys:
         hits = [c for c in candidates if kw in c.lower()]
@@ -98,7 +83,6 @@ def _load_one_base(path: Path, index_col: str, true_col: str | None, i: int) -> 
 
     pred_col = _detect_pred_col(df, index_col, true_col)
 
-    # tag dựa trên tên cột pred + tên file
     tag = _infer_tag_from_text(pred_col + " " + path.name, i)
     new_pred = f"pred_{tag}"
 
@@ -112,7 +96,6 @@ def _load_one_base(path: Path, index_col: str, true_col: str | None, i: int) -> 
         ex = df[df[index_col].duplicated()][index_col].head(5).tolist()
         raise ValueError(f"[{path}] {index_col} bị trùng. Ví dụ: {ex}")
 
-    # numeric
     df[new_pred] = pd.to_numeric(df[new_pred], errors="coerce")
     if df[new_pred].isna().any():
         df[new_pred] = df[new_pred].fillna(df[new_pred].mean())
@@ -134,7 +117,7 @@ def merge_base_files(paths: list[Path], index_col: str, true_col: str | None) ->
 
     merged = frames[0]
     for f in frames[1:]:
-        # Drop true_col from subsequent frames to avoid duplicate columns
+
         if true_col is not None and true_col in f.columns:
             f = f.drop(columns=[true_col])
         merged = merged.merge(f, on=index_col, how="inner")
@@ -152,16 +135,12 @@ def merge_base_files(paths: list[Path], index_col: str, true_col: str | None) ->
 
     print("Merged size:", len(merged), "| unique idx:", merged[index_col].nunique())
 
-    # cảnh báo nếu merge bị rớt dòng
     min_len = min(len(x) for x in frames)
     if len(merged) < min_len:
         print("[WARN] Merge bị rớt dòng (inner join). Kiểm tra original_row_index giữa các file có khớp không.")
 
     return merged
 
-# ============================================================
-# Metrics
-# ============================================================
 def rmse(y_true, y_pred) -> float:
     y_true = np.asarray(y_true, float)
     y_pred = np.asarray(y_pred, float)
@@ -179,9 +158,6 @@ def r2(y_true, y_pred) -> float:
     ss_tot = float(np.sum((y_true - y_true.mean()) ** 2))
     return 0.0 if ss_tot == 0 else float(1.0 - ss_res / ss_tot)
 
-# ============================================================
-# KFold indices
-# ============================================================
 def kfold_indices(n: int, k: int, seed: int):
     rng = np.random.default_rng(seed)
     idx = np.arange(n)
@@ -199,9 +175,6 @@ def kfold_indices(n: int, k: int, seed: int):
         cur += fs
     return folds
 
-# ============================================================
-# Nonlinear meta-features
-# ============================================================
 def build_meta_features(P: np.ndarray):
     """
     P: (n, m) base preds, m = số base models (4)
@@ -209,7 +182,7 @@ def build_meta_features(P: np.ndarray):
     """
     P = np.asarray(P, float)
     n, m = P.shape
-    feats = [P]  # base
+    feats = [P]  
 
     if USE_SQUARES:
         feats.append(P ** 2)
@@ -239,9 +212,6 @@ def build_meta_features(P: np.ndarray):
 
     return np.hstack(feats)
 
-# ============================================================
-# Ridge (closed-form) + alpha CV (efficient)
-# ============================================================
 def _standardize_fit(X: np.ndarray):
     mu = X.mean(axis=0)
     sd = X.std(axis=0)
@@ -257,11 +227,11 @@ def _ridge_fit_from_gram(G: np.ndarray, c: np.ndarray, alpha: float):
     Reg does NOT penalize intercept (index 0)
     """
     A = G.copy()
-    # add alpha to diagonal except intercept
+
     d = A.shape[0] - 1
     diag = np.diag_indices(d + 1)
     A[diag] += alpha
-    A[0, 0] -= alpha  # undo for intercept
+    A[0, 0] -= alpha  
     w = np.linalg.solve(A, c)
     return w
 
@@ -322,15 +292,12 @@ def tune_alpha_cv(X: np.ndarray, y: np.ndarray, alphas, k=5, seed=42):
 
     return best_alpha, best_score
 
-# ============================================================
-# Main
-# ============================================================
 def main():
-    # -------- TRAIN (OOF) --------
+
     train_df = merge_base_files(TRAIN_BASE_FILES, INDEX_COL, TRUE_COL)
     pred_cols = [c for c in train_df.columns if c.startswith("pred_")]
 
-    # ưu tiên thứ tự đẹp: lr, rf, knn, gbdt nếu có
+
     prefer = ["pred_lr", "pred_rf", "pred_knn", "pred_gbdt"]
     pred_cols = [c for c in prefer if c in pred_cols] + [c for c in pred_cols if c not in prefer]
 
