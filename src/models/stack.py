@@ -222,10 +222,6 @@ def _standardize_apply(X: np.ndarray, mu: np.ndarray, sd: np.ndarray):
     return (X - mu) / sd
 
 def _ridge_fit_from_gram(G: np.ndarray, c: np.ndarray, alpha: float):
-    """
-    Solve (G + alpha*Reg) w = c
-    Reg does NOT penalize intercept (index 0)
-    """
     A = G.copy()
 
     d = A.shape[0] - 1
@@ -348,16 +344,46 @@ def main():
     if has_y and TRUE_COL in test_df.columns:
         y_test = test_df[TRUE_COL].to_numpy(float)
 
-        print("\n===== TEST METRICS (META) =====")
-        print(f"Meta RMSE: {rmse(y_test, yhat_te):.6f} | MAE: {mae(y_test, yhat_te):.6f} | R2: {r2(y_test, yhat_te):.6f}")
+        # META metrics
+        meta_rmse = rmse(y_test, yhat_te)
+        meta_mae  = mae(y_test, yhat_te)
+        meta_r2   = r2(y_test, yhat_te)
 
-        print("\n===== BASE TEST RMSE (reference) =====")
+        # BASE metrics (RMSE/MAE/R2)
+        base_rows = []
         for c in pred_cols:
-            print(f"{c}: {rmse(y_test, test_df[c].to_numpy(float)):.6f}")
+            yb = test_df[c].to_numpy(float)
+            base_rows.append((c, rmse(y_test, yb), mae(y_test, yb), r2(y_test, yb)))
+
+        base_rows.sort(key=lambda x: x[1])  # sort theo RMSE
+        best_name, best_rmse, best_mae, best_r2 = base_rows[0]
+
+        improve = best_rmse - meta_rmse
+        improve_pct = (improve / best_rmse * 100.0) if best_rmse != 0 else 0.0
+
+        print("\n================ TOTAL PERFORMANCE ================")
+        print("META Ridge (Stacking) | 4 base + poly features")
+        print("Base cols:", pred_cols)
+        print(f"Best alpha: {best_alpha:.6g} | CV-RMSE(mean): {cv_rm:.6f}")
+        print(f"Train RMSE: {rmse(y_train, yhat_tr):.6f} | MAE: {mae(y_train, yhat_tr):.6f} | R2: {r2(y_train, yhat_tr):.6f}")
+
+        print("\n--- TEST (FINAL / META) ---")
+        print(f"RMSE: {meta_rmse:.6f} | MAE: {meta_mae:.6f} | R2: {meta_r2:.6f}")
+
+        print("\n--- BEST BASE ON TEST ---")
+        print(f"{best_name} -> RMSE: {best_rmse:.6f} | MAE: {best_mae:.6f} | R2: {best_r2:.6f}")
+        print(f"GAIN (RMSE): {improve:.6f} ({improve_pct:.2f}%) vs best base")
+
+        print("\n--- BASE MODELS (TEST) ---")
+        print(f"{'model':<14} {'rmse':>10} {'mae':>10} {'r2':>10}")
+        for name, r, m, rr in base_rows:
+            print(f"{name:<14} {r:>10.6f} {m:>10.6f} {rr:>10.6f}")
 
         out[TRUE_COL] = y_test
 
     out.to_csv(OUT_TEST_PRED, index=False)
+    p = (1-meta_rmse/5)*100;
+    print(f"Performance: {p}")
     print(f"\nSaved: {OUT_TEST_PRED}")
 
 
